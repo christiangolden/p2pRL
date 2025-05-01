@@ -2,7 +2,7 @@ import { initLandingPage } from './ui/landing.js';
 import { showGameView, updateGameView } from './ui/game-view.js';
 import { initializePeer, setAsHost, connectToHost, sendData, broadcastData, getPeerId, getClientPeerIds, getHostPeerId } from './connection/p2p.js';
 import { generateDungeon, isWalkable } from './game/dungeon.js';
-import { initInput, disableInput } from './game/input.js';
+import { initInput, disableInput, setupTouchControls } from './game/input.js';
 
 // Game State (SOW II.D.1)
 let gameState = {
@@ -58,6 +58,10 @@ function setupHost(peerId) {
 
     // Initialize input (II.C.3)
     initInput(handleLocalMovementInput);
+    // --- Add Logging --- 
+    console.log('[App] Calling setupTouchControls from setupHost...');
+    // --- End Logging --- 
+    setupTouchControls(handleLocalMovementInput); 
 }
 
 function handleClientConnect(clientPeerId) {
@@ -124,6 +128,10 @@ function setupClient() {
     showGameView();
     // Initialize input (II.C.3) - sends data to host
     initInput(handleLocalMovementInput);
+    // --- Add Logging --- 
+    console.log('[App] Calling setupTouchControls from setupClient...');
+    // --- End Logging --- 
+    setupTouchControls(handleLocalMovementInput); 
     // Client waits for the first gameStateUpdate from the host to render
     // Request initial state from host upon connection
     const hostPeerId = getHostPeerId();
@@ -206,7 +214,7 @@ function handleLocalMovementInput(direction) {
 function processMovement(playerId, direction) {
     const player = gameState.players.find(p => p.id === playerId);
     if (!player) {
-        console.warn(`Cannot process movement for unknown player ${playerId}`);
+        console.warn(`[processMovement] Cannot process movement for unknown player ${playerId}`);
         return;
     }
 
@@ -220,15 +228,27 @@ function processMovement(playerId, direction) {
         case 'right': targetX++; break;
     }
 
+    // --- Add Logging --- 
+    console.log(`[processMovement] Player ${playerId} attempting move ${direction} to (${targetX}, ${targetY}). Current: (${player.x}, ${player.y})`);
+
+    const walkable = isWalkable(dungeon, targetX, targetY);
+    const occupied = isOccupied(targetX, targetY);
+    console.log(`[processMovement] Validation: walkable=${walkable}, occupied=${occupied}`);
+    // --- End Logging --- 
+
     // Validate move (II.D.3)
-    if (isWalkable(dungeon, targetX, targetY) && !isOccupied(targetX, targetY)) {
+    if (walkable && !occupied) {
         player.x = targetX;
         player.y = targetY;
-        console.log(`Player ${playerId} moved to (${targetX}, ${targetY})`);
+        // --- Add Logging --- 
+        console.log(`[processMovement] Player ${playerId} VALID move to (${targetX}, ${targetY}). Broadcasting state.`);
+        // --- End Logging --- 
         // Host broadcasts the new state after any valid move
         broadcastGameState();
     } else {
-        console.log(`Player ${playerId} invalid move to (${targetX}, ${targetY})`);
+        // --- Add Logging --- 
+        console.log(`[processMovement] Player ${playerId} INVALID move to (${targetX}, ${targetY})`);
+        // --- End Logging --- 
         // Invalid move, do nothing (SOW II.D.3)
     }
 }

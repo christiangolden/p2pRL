@@ -15,7 +15,7 @@ body {
 }
 
 #game-view {
-    display: none; /* Hidden initially */
+    /* display: none; */ /* Rely on .hidden class for initial hiding */
     font-family: monospace; /* Use monospace for ASCII grid */
     white-space: pre; /* Preserve whitespace for grid */
     line-height: 1; /* Ensure grid lines are tight */
