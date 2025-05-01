@@ -51,3 +51,46 @@ input[type="text"] {
 .player-blue { color: blue; }
 .player-green { color: green; }
 .player-yellow { color: yellow; }
+
+/* Utility class */
+.hidden {
+    display: none;
+}
+
+/* Touch Controls Styling */
+#touch-controls {
+    margin-top: 20px;
+    display: none; /* Hidden by default, shown when game-view is active */
+    flex-direction: column;
+    align-items: center;
+    user-select: none; /* Prevent text selection on buttons */
+    -webkit-user-select: none; /* Safari */
+    -moz-user-select: none; /* Firefox */
+    -ms-user-select: none; /* IE/Edge */
+}
+
+#game-view:not(.hidden) + #touch-controls {
+    display: flex; /* Show controls only when game-view is not hidden */
+}
+
+.touch-btn {
+    font-size: 24px;
+    padding: 15px 20px;
+    margin: 5px;
+    min-width: 60px;
+    text-align: center;
+    background-color: #eee;
+    border: 1px solid #ccc;
+    border-radius: 5px;
+    cursor: pointer;
+}
+
+.touch-btn:active {
+    background-color: #ddd;
+}
+
+/* Basic layout for touch controls */
+#touch-controls > div {
+    display: flex;
+    justify-content: center;
+}
