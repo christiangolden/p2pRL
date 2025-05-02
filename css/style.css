@@ -4,14 +4,17 @@ body {
     flex-direction: column;
     align-items: center;
     margin: 20px;
+    background-color: #000000;
+    color: #e0e0e0; /* Light text color for better contrast on dark background */
 }
 
 #landing-page, #game-view {
-    border: 1px solid #ccc;
+    border: 1px solid #444;
     padding: 20px;
     margin-bottom: 20px;
     min-width: 300px;
     text-align: center;
+    background-color: #111; /* Slightly lighter than black for content areas */
 }
 
 #game-view {
@@ -40,11 +43,23 @@ button {
     padding: 10px 15px;
     margin: 5px;
     cursor: pointer;
+    background-color: #333;
+    color: #fff;
+    border: 1px solid #555;
+    border-radius: 4px;
+}
+
+button:hover {
+    background-color: #444;
 }
 
 input[type="text"] {
     padding: 8px;
     margin-right: 5px;
+    background-color: #222;
+    color: #fff;
+    border: 1px solid #555;
+    border-radius: 4px;
 }
 
 /* Player colors - defined in SOW II.C.2 with enhanced brightness */
@@ -84,6 +99,7 @@ input[type="text"] {
     border: 1px solid #ccc;
     border-radius: 5px;
     cursor: pointer;
+    color: #000; /* Making the triangle symbols black */
 }
 
 .touch-btn:active {
@@ -146,17 +162,18 @@ input[type="text"] {
 .copyable {
     cursor: pointer;
     padding: 6px 10px;
-    background-color: #f0f0f0;
-    border: 1px dashed #999;
+    background-color: #222;
+    border: 1px dashed #555;
     border-radius: 4px;
     display: inline-block;
     user-select: all; /* Makes text easy to select */
     transition: background-color 0.2s, border-color 0.2s;
+    color: #fff;
 }
 
 .copyable:hover, .copyable:focus {
-    background-color: #e0e0e0;
-    border-color: #555;
+    background-color: #333;
+    border-color: #777;
 }
 
 .copyable:active {
