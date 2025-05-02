@@ -11,6 +11,7 @@ let gameState = {
 let dungeon = null;
 let isHost = false;
 let localPeerId = null;
+let localPlayerColor = null; // Track current player's color for chat
 
 // Player Colors (SOW II.C.2)
 const PLAYER_COLORS = ['red', 'blue', 'green', 'yellow'];
@@ -87,6 +88,9 @@ function setupHost(peerId) {
     console.log('[App] Calling setupTouchControls from setupHost...');
     // --- End Logging --- 
     setupTouchControls(handleLocalMovementInput); 
+
+    // Set up Chat box (for all players, but activated here for host)
+    setupChatBox();
 }
 
 // Helper function to copy text to clipboard
@@ -172,6 +176,9 @@ function handleHostData(data, senderPeerId) {
     } else if (data.type === 'requestInitialState') {
         // Client is requesting the current state after connecting
         sendCurrentStateToClient(senderPeerId);
+    } else if (data.type === 'chat') {
+        // Process incoming chat message
+        processChatMessage(data, senderPeerId);
     }
 }
 
@@ -219,6 +226,9 @@ function setupClient() {
         console.log("Requesting initial state from host...");
         sendData(hostPeerId, { type: 'requestInitialState' });
     }
+
+    // Set up Chat box for client
+    setupChatBox();
 }
 
 function handleClientData(data, senderPeerId) {
@@ -232,6 +242,9 @@ function handleClientData(data, senderPeerId) {
         } else {
             console.warn('Received game state update before dungeon was generated.');
         }
+    } else if (data.type === 'chat') {
+        // Process incoming chat message
+        processChatMessage(data, data.sender); // Use the sender ID from the message
     } else {
         console.warn('Received unknown data type from host:', data);
     }
@@ -383,4 +396,140 @@ function showGameNotification(message) {
     setTimeout(() => {
         notificationElement.className = 'game-notification';
     }, 3000);
+}
+
+// Set up the chat functionality
+function setupChatBox() {
+    const chatContainer = document.getElementById('chat-container');
+    const chatInput = document.getElementById('chat-input');
+    const chatSendBtn = document.getElementById('chat-send-btn');
+    
+    if (chatContainer && chatInput && chatSendBtn) {
+        // Show chat container
+        chatContainer.classList.remove('hidden');
+        
+        // Send button click handler
+        chatSendBtn.addEventListener('click', () => sendChatMessage());
+        
+        // Enter key handler
+        chatInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                sendChatMessage();
+            }
+        });
+        
+        // Add system message that chat is ready
+        addChatMessage('System', 'Chat is now active. Be nice!', 'system');
+    }
+}
+
+// Send a chat message to all peers
+function sendChatMessage() {
+    const chatInput = document.getElementById('chat-input');
+    if (!chatInput || !chatInput.value.trim()) return;
+    
+    const message = chatInput.value.trim();
+    chatInput.value = '';
+    
+    // Find player's color based on peerId
+    const currentPlayer = gameState.players.find(p => p.id === localPeerId);
+    localPlayerColor = currentPlayer ? currentPlayer.color : 'unknown';
+    
+    // Add message to local chat (as 'self' type)
+    addChatMessage('You', message, 'self');
+    
+    // Create message data object
+    const chatData = {
+        type: 'chat',
+        sender: localPeerId,
+        senderColor: localPlayerColor,
+        message: message,
+        isInitialBroadcast: true // Flag to track initial broadcast
+    };
+    
+    // Send message based on role
+    if (isHost) {
+        // Host broadcasts to all clients
+        broadcastData(chatData);
+    } else {
+        // Client sends to host
+        const hostPeerId = getHostPeerId();
+        if (hostPeerId) {
+            sendData(hostPeerId, chatData);
+        }
+    }
+}
+
+// Add a chat message to the UI - updated for traditional chat style (newest at bottom)
+function addChatMessage(sender, message, messageType = '') {
+    const chatMessages = document.getElementById('chat-messages');
+    if (!chatMessages) return;
+    
+    const messageElement = document.createElement('div');
+    messageElement.className = `chat-message ${messageType}`;
+    
+    // Format based on message type
+    if (messageType === 'system') {
+        // For system messages, simple text in the center
+        messageElement.textContent = `${message}`;
+    } else if (messageType === 'self') {
+        // For your own messages (right aligned)
+        messageElement.textContent = message;
+    } else {
+        // For messages from others (left aligned)
+        const usernameSpan = document.createElement('span');
+        usernameSpan.className = 'username';
+        usernameSpan.textContent = sender;
+        
+        messageElement.appendChild(usernameSpan);
+        messageElement.appendChild(document.createTextNode(message));
+    }
+    
+    // Add to bottom (append to container)
+    chatMessages.appendChild(messageElement);
+    
+    // Auto-scroll to the newest message
+    chatMessages.scrollTop = chatMessages.scrollHeight;
+}
+
+// Process incoming chat messages
+function processChatMessage(data, senderPeerId) {
+    // Skip processing if this is our own message
+    if (senderPeerId === localPeerId) {
+        // Only rebroadcast to other clients if we're the host
+        if (isHost) {
+            gameState.players.forEach(player => {
+                if (player.id !== localPeerId) {
+                    // When host rebroadcasts, mark it as not the initial broadcast
+                    const rebroadcastData = {...data, isInitialBroadcast: false};
+                    sendData(player.id, rebroadcastData);
+                }
+            });
+        }
+        return; // Skip adding our own message again
+    }
+    
+    // For clients: skip if this is a rebroadcast message from the host
+    if (!isHost && !data.isInitialBroadcast) {
+        return; // This is a rebroadcast, not the initial message
+    }
+    
+    // Find the sender's display name based on color
+    const sender = gameState.players.find(p => p.id === data.sender);
+    const displayName = sender ? `Player (${sender.color})` : 'Unknown';
+    
+    // Add the message to chat
+    addChatMessage(displayName, data.message);
+    
+    // If host, rebroadcast to other clients (except the sender)
+    if (isHost && data.isInitialBroadcast) {
+        gameState.players.forEach(player => {
+            if (player.id !== localPeerId && player.id !== senderPeerId) {
+                // When host rebroadcasts, mark it as not the initial broadcast
+                const rebroadcastData = {...data, isInitialBroadcast: false};
+                sendData(player.id, rebroadcastData);
+            }
+        });
+    }
 }
