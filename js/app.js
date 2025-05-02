@@ -38,12 +38,37 @@ function setupHost(peerId) {
     setAsHost();
 
     // Display session key (II.A.2)
-    const sessionInfoDiv = document.getElementById('session-info'); // Changed ID
+    const sessionInfoDiv = document.getElementById('session-info');
     const sessionKeyElement = document.getElementById('session-key');
+    const copyFeedback = document.getElementById('copy-feedback');
+    
     if (sessionInfoDiv && sessionKeyElement) {
         sessionKeyElement.textContent = peerId;
-        sessionInfoDiv.classList.remove('hidden'); // Use classList
+        sessionInfoDiv.classList.remove('hidden');
         sessionInfoDiv.style.display = 'block'; // Ensure it's block display
+        
+        // Add clipboard copy functionality
+        sessionKeyElement.addEventListener('click', () => copyToClipboard(peerId, copyFeedback));
+        sessionKeyElement.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+                copyToClipboard(peerId, copyFeedback);
+            }
+        });
+    }
+
+    // Set up Share Key button (visible only for host)
+    const shareKeyContainer = document.getElementById('share-key-container');
+    const shareKeyBtn = document.getElementById('share-key-btn');
+    if (shareKeyContainer && shareKeyBtn) {
+        // Show the button (only for host)
+        shareKeyContainer.classList.remove('hidden');
+        
+        // Add click handler to copy session key
+        shareKeyBtn.addEventListener('click', () => {
+            copyToClipboard(peerId);
+            // Show in-game notification
+            showGameNotification('Session key copied to clipboard!');
+        });
     }
 
     // Generate dungeon (II.C.1)
@@ -62,6 +87,61 @@ function setupHost(peerId) {
     console.log('[App] Calling setupTouchControls from setupHost...');
     // --- End Logging --- 
     setupTouchControls(handleLocalMovementInput); 
+}
+
+// Helper function to copy text to clipboard
+function copyToClipboard(text, feedbackElement = null) {
+    // Use the modern Clipboard API if available
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text)
+            .then(() => {
+                if (feedbackElement) {
+                    showCopyFeedback(feedbackElement);
+                }
+            })
+            .catch(err => console.error('Could not copy text: ', err));
+    } else {
+        // Fallback for older browsers
+        const textArea = document.createElement('textarea');
+        textArea.value = text;
+        textArea.style.position = 'fixed';  // Avoid scrolling to bottom
+        document.body.appendChild(textArea);
+        textArea.focus();
+        textArea.select();
+
+        try {
+            const successful = document.execCommand('copy');
+            if (successful && feedbackElement) {
+                showCopyFeedback(feedbackElement);
+            } else if (!successful) {
+                console.error('Failed to copy');
+            }
+        } catch (err) {
+            console.error('Error copying text: ', err);
+        }
+
+        document.body.removeChild(textArea);
+    }
+}
+
+// Show the copy feedback message
+function showCopyFeedback(feedbackElement) {
+    if (feedbackElement) {
+        feedbackElement.classList.remove('hidden');
+        feedbackElement.style.display = 'block';
+        feedbackElement.style.opacity = '1';
+        
+        // Reset animation
+        feedbackElement.style.animation = 'none';
+        feedbackElement.offsetHeight; // Trigger reflow
+        feedbackElement.style.animation = 'fadeOut 1.5s forwards';
+        feedbackElement.style.animationDelay = '1.5s';
+        
+        // Hide after animation completes
+        setTimeout(() => {
+            feedbackElement.classList.add('hidden');
+        }, 3000);
+    }
 }
 
 function handleClientConnect(clientPeerId) {
@@ -283,4 +363,24 @@ function sendCurrentStateToClient(clientPeerId) {
     };
     console.log(`Host sending initial state to ${clientPeerId}:`, stateMessage);
     sendData(clientPeerId, stateMessage);
+}
+
+// Show a temporary notification in the game view
+function showGameNotification(message) {
+    // Create notification element if it doesn't exist
+    let notificationElement = document.getElementById('game-notification');
+    if (!notificationElement) {
+        notificationElement = document.createElement('div');
+        notificationElement.id = 'game-notification';
+        document.body.appendChild(notificationElement);
+    }
+    
+    // Set the message and show the notification
+    notificationElement.textContent = message;
+    notificationElement.className = 'game-notification show';
+    
+    // Hide after 3 seconds
+    setTimeout(() => {
+        notificationElement.className = 'game-notification';
+    }, 3000);
 }
