@@ -29,6 +29,9 @@ export function initLandingPage(createWorldCallback, joinWorldCallback) {
     
     // Initially disable the connect button until all validations pass
     submitJoinButton.disabled = true;
+    
+    // Clear the session key input field on page load
+    sessionKeyInput.value = '';
 
     if (!createWorldButton || !joinWorldButton || !joinSection || !sessionKeyInput || !submitJoinButton || !landingPage) {
         console.error('Landing page elements not found!');
@@ -41,6 +44,9 @@ export function initLandingPage(createWorldCallback, joinWorldCallback) {
     });
 
     joinWorldButton.addEventListener('click', () => {
+        // Clear input field and reset validation when showing the join form
+        sessionKeyInput.value = '';
+        
         joinSection.classList.remove('hidden'); // Use classList to show/hide
         joinSection.style.display = 'block'; // Ensure it's block display
         
