@@ -20,7 +20,47 @@ const PLAYER_COLORS = ['red', 'blue', 'green', 'yellow'];
 document.addEventListener('DOMContentLoaded', () => {
     console.log('DOM fully loaded and parsed');
     initLandingPage(handleCreateWorld, handleJoinWorld);
+    
+    // Add visibility change detection for mobile browsers
+    document.addEventListener('visibilitychange', handleVisibilityChange);
 });
+
+// Handle browser tab visibility changes (especially important for mobile)
+function handleVisibilityChange() {
+    if (document.hidden) {
+        console.log('Page is now hidden (browser tab inactive)');
+        // Page is hidden - might be mobile browser going to background
+        // We'll ping more aggressively to maintain connection
+        if (typeof window._visibilityPingInterval !== 'undefined') {
+            clearInterval(window._visibilityPingInterval);
+        }
+        
+        // When page is hidden, start frequent pings to keep connection alive
+        if (!isHost && hostPeerId) {
+            console.log('Starting visibility change ping interval to host');
+            // Send a ping every second while hidden to prevent disconnection
+            window._visibilityPingInterval = setInterval(() => {
+                sendData(hostPeerId, { type: 'keepAlive', source: 'visibilityChange' });
+            }, 1000);
+        } else if (isHost) {
+            console.log('Host is hidden - continuing normal operations');
+        }
+    } else {
+        console.log('Page is now visible (browser tab active)');
+        // Page is visible again, stop aggressive pinging
+        if (typeof window._visibilityPingInterval !== 'undefined') {
+            clearInterval(window._visibilityPingInterval);
+            window._visibilityPingInterval = undefined;
+            console.log('Stopped visibility change ping interval');
+        }
+        
+        // If we're a client, check if we're still connected to the host
+        if (!isHost && hostPeerId) {
+            // Send a single ping to check connection is still alive
+            sendData(hostPeerId, { type: 'keepAlive', source: 'visibilityChangeEnd' });
+        }
+    }
+}
 
 // --- Host Logic (II.B.3, II.D.3, II.D.4) ---
 function handleCreateWorld() {

@@ -52,8 +52,10 @@ let playerColorMap = new Map();
 let connectionMonitorInterval = null;
 const CONNECTION_HEALTH_CHECK_INTERVAL = 3000; // Reduced from 5000ms to 3000ms
 const CONNECTION_TIMEOUT = 6000; // Reduced from 10000ms to 6000ms
+const CONNECTION_MISSED_PING_LIMIT = 2; // Number of consecutive missed pings before considering disconnected
 const connectionLastActivity = {}; // Track last activity timestamp for each connection
 const heartbeatIntervals = {}; // Track heartbeat intervals for each connection
+const missedPingCounter = {}; // Track number of consecutive missed pings
 
 // Initialize the Peer.js instance with callbacks
 export function initializePeer(callbacks) {
@@ -257,11 +259,27 @@ function sendPing(peerId) {
         return;
     }
     
+    // Initialize or increment missed ping counter
+    if (!missedPingCounter[peerId]) {
+        missedPingCounter[peerId] = 0;
+    } else {
+        missedPingCounter[peerId]++;
+    }
+    
+    // If we've hit the missed ping limit, consider the peer disconnected
+    if (missedPingCounter[peerId] >= CONNECTION_MISSED_PING_LIMIT) {
+        console.warn(`Client ${peerId} has missed ${missedPingCounter[peerId]} consecutive pings. Considering disconnected.`);
+        handleDisconnection(peerId);
+        return;
+    }
+    
     try {
         connections[peerId].send({
             type: 'ping',
-            timestamp: Date.now()
+            timestamp: Date.now(),
+            pingId: Math.random().toString(36).substring(2, 10) // Add a unique ID to each ping
         });
+        console.log(`Ping sent to client ${peerId}`);
     } catch (err) {
         console.error(`Error sending ping to ${peerId}:`, err);
         handleDisconnection(peerId);
@@ -276,11 +294,27 @@ function sendPingToHost() {
         return;
     }
     
+    // Initialize or increment missed ping counter
+    if (!missedPingCounter['host']) {
+        missedPingCounter['host'] = 0;
+    } else {
+        missedPingCounter['host']++;
+    }
+    
+    // If we've hit the missed ping limit, consider the host disconnected
+    if (missedPingCounter['host'] >= CONNECTION_MISSED_PING_LIMIT) {
+        console.warn(`Host has missed ${missedPingCounter['host']} consecutive pings. Considering disconnected.`);
+        handleHostDisconnection();
+        return;
+    }
+    
     try {
         hostConnection.send({
             type: 'ping',
-            timestamp: Date.now()
+            timestamp: Date.now(),
+            pingId: Math.random().toString(36).substring(2, 10) // Add unique ID to each ping
         });
+        console.log('Ping sent to host');
     } catch (err) {
         console.error('Error sending ping to host:', err);
         handleHostDisconnection();
@@ -403,12 +437,17 @@ function handleIncomingConnection(conn) {
         
         // Handle ping messages specially
         if (data.type === 'ping') {
-            // Respond to ping with a pong
-            conn.send({ type: 'pong', timestamp: data.timestamp });
+            // Respond to ping with a pong that includes the original ping ID
+            conn.send({ 
+                type: 'pong', 
+                timestamp: data.timestamp,
+                pingId: data.pingId // Echo back the ping ID for correlation
+            });
             return;
         } else if (data.type === 'pong') {
-            // Pong received, connection is active
-            console.log(`Received pong from client ${clientPeerId}`);
+            // Reset missed ping counter when we receive a pong
+            missedPingCounter[clientPeerId] = 0;
+            console.log(`Received pong from client ${clientPeerId}, connection confirmed active`);
             return;
         }
         
@@ -483,12 +522,17 @@ export function connectToHost(hostPeerId) {
             
             // Handle ping/pong messages
             if (data.type === 'ping') {
-                // Respond to ping with a pong
-                conn.send({ type: 'pong', timestamp: data.timestamp });
+                // Respond to ping with a pong that includes the original ping ID
+                conn.send({ 
+                    type: 'pong', 
+                    timestamp: data.timestamp,
+                    pingId: data.pingId // Echo back the ping ID for correlation 
+                });
                 return;
             } else if (data.type === 'pong') {
-                // Pong received, connection is active
-                console.log('Received pong from host');
+                // Reset missed ping counter when we receive a pong
+                missedPingCounter['host'] = 0;
+                console.log('Received pong from host, connection confirmed active');
                 return;
             }
             
