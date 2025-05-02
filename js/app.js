@@ -12,6 +12,7 @@ let dungeon = null;
 let isHost = false;
 let localPeerId = null;
 let localPlayerColor = null; // Track current player's color for chat
+let hostPeerId = null; // Store the host peer ID for all players
 
 // Player Colors (SOW II.C.2)
 const PLAYER_COLORS = ['red', 'blue', 'green', 'yellow'];
@@ -36,6 +37,7 @@ function handleCreateWorld() {
 function setupHost(peerId) {
     console.log(`Host peer ready with ID: ${peerId}`);
     localPeerId = peerId;
+    hostPeerId = peerId; // Host stores its own peer ID
     setAsHost();
 
     // Display session key (II.A.2)
@@ -57,20 +59,8 @@ function setupHost(peerId) {
         });
     }
 
-    // Set up Share Key button (visible only for host)
-    const shareKeyContainer = document.getElementById('share-key-container');
-    const shareKeyBtn = document.getElementById('share-key-btn');
-    if (shareKeyContainer && shareKeyBtn) {
-        // Show the button (only for host)
-        shareKeyContainer.classList.remove('hidden');
-        
-        // Add click handler to copy session key
-        shareKeyBtn.addEventListener('click', () => {
-            copyToClipboard(peerId);
-            // Show in-game notification
-            showGameNotification('Session key copied to clipboard!');
-        });
-    }
+    // Set up Share Key button
+    setupShareKeyButton(peerId);
 
     // Generate dungeon (II.C.1)
     dungeon = generateDungeon();
@@ -186,6 +176,7 @@ function handleHostData(data, senderPeerId) {
 function handleJoinWorld(sessionKey) {
     console.log(`Attempting to join world with key: ${sessionKey}`);
     isHost = false;
+    hostPeerId = sessionKey; // Store the host peer ID
     initializePeer({
         onPeerConnected: (peerId) => {
             localPeerId = peerId;
@@ -211,6 +202,10 @@ function setupClient() {
     console.log('Successfully connected to host.');
     // Generate dungeon locally (II.C.1)
     dungeon = generateDungeon();
+    
+    // Setup share key button for clients as well
+    setupShareKeyButton(hostPeerId);
+    
     // Show game view (II.A.3)
     showGameView();
     // Initialize input (II.C.3) - sends data to host
@@ -219,12 +214,15 @@ function setupClient() {
     console.log('[App] Calling setupTouchControls from setupClient...');
     // --- End Logging --- 
     setupTouchControls(handleLocalMovementInput); 
+    
     // Client waits for the first gameStateUpdate from the host to render
     // Request initial state from host upon connection
-    const hostPeerId = getHostPeerId();
+    // Use the global hostPeerId variable that was already set in handleJoinWorld
     if (hostPeerId) {
         console.log("Requesting initial state from host...");
         sendData(hostPeerId, { type: 'requestInitialState' });
+    } else {
+        console.error("Host peer ID not found. Cannot request initial state.");
     }
 
     // Set up Chat box for client
@@ -251,6 +249,30 @@ function handleClientData(data, senderPeerId) {
 }
 
 // --- Shared Logic ---
+
+// Setup the Share Key button for all players
+function setupShareKeyButton(sessionKey) {
+    const shareKeyContainer = document.getElementById('share-key-container');
+    const shareKeyBtn = document.getElementById('share-key-btn');
+    
+    if (shareKeyContainer && shareKeyBtn) {
+        // Show the button for all players (not just host)
+        shareKeyContainer.classList.remove('hidden');
+        
+        // Add click handler to copy session key
+        shareKeyBtn.addEventListener('click', () => {
+            // Check if maximum players has been reached before sharing
+            if (gameState.players.length >= PLAYER_COLORS.length) {
+                showGameNotification('Maximum players reached, cannot share key.');
+                return;
+            }
+            
+            copyToClipboard(sessionKey);
+            // Show in-game notification
+            showGameNotification('Session key copied to clipboard!');
+        });
+    }
+}
 
 function addPlayer(peerId) {
     if (gameState.players.some(p => p.id === peerId)) {
@@ -510,10 +532,8 @@ function processChatMessage(data, senderPeerId) {
         return; // Skip adding our own message again
     }
     
-    // For clients: skip if this is a rebroadcast message from the host
-    if (!isHost && !data.isInitialBroadcast) {
-        return; // This is a rebroadcast, not the initial message
-    }
+    // REMOVED: The filter that prevented clients from seeing messages from other clients
+    // For clients: we now show all messages, not just from the host
     
     // Find the sender's display name based on color
     const sender = gameState.players.find(p => p.id === data.sender);
