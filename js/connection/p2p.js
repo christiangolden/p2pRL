@@ -15,10 +15,12 @@ const PEER_CONFIG = {
 
 // Connection persistence configuration
 const CONNECTION_CONFIG = {
-    heartbeatInterval: 2000,    // Reduced from 3000ms to 2000ms for quicker detection
-    missedHeartbeatsLimit: 2,   // Number of consecutive missed heartbeats before considering disconnection
-    reconnectAttempts: 3,       // Number of reconnect attempts
-    reconnectDelay: 2000        // Milliseconds between reconnect attempts
+    heartbeatInterval: 2000,          // Heartbeat frequency
+    missedHeartbeatsLimit: 10,        // Increased significantly to be more tolerant
+    reconnectAttempts: 5,             
+    reconnectDelay: 2000,             
+    visibilityTimeout: 3600000,       // Extended to 1 hour when tab is hidden (prevent mobile app switching disconnects)
+    mobileKeepAliveInterval: 5000     // How often to try to maintain connection when app is switched away
 };
 
 // Global variables
@@ -33,8 +35,11 @@ let callbackConfig = {
     onHostDisconnected: () => {},
     onClientConnected: () => {},
     onClientDisconnected: () => {},
+    onClientFinalDisconnect: () => {}, // New callback for final disconnection after timeout
     onDataReceived: () => {},
     onColorRecycled: () => {},  // New callback for color recycling
+    onGetPlayerPosition: () => {}, // New callback to get player position
+    onReconnectWithPosition: () => {} // New callback to restore position on reconnect
 };
 
 // Add these variables near the top with other globals
@@ -51,11 +56,29 @@ let playerColorMap = new Map();
 // Connection monitoring variables
 let connectionMonitorInterval = null;
 const CONNECTION_HEALTH_CHECK_INTERVAL = 3000; // Reduced from 5000ms to 3000ms
-const CONNECTION_TIMEOUT = 6000; // Reduced from 10000ms to 6000ms
-const CONNECTION_MISSED_PING_LIMIT = 2; // Number of consecutive missed pings before considering disconnected
+const CONNECTION_TIMEOUT = 10000; // Increased from 6000ms to 10000ms to be more tolerant for mobile
+const CONNECTION_MISSED_PING_LIMIT = 4; // Increased from 2 to 4
 const connectionLastActivity = {}; // Track last activity timestamp for each connection
 const heartbeatIntervals = {}; // Track heartbeat intervals for each connection
 const missedPingCounter = {}; // Track number of consecutive missed pings
+
+// New variables for handling visibility state
+let isDocumentHidden = false;
+let lastPlayerPositions = new Map(); // To store player positions before disconnect
+
+// Track mobile disconnections and positions
+let mobileDisconnections = new Map(); // Map of clientId -> {position, color, timestamp}
+
+// New variables for mobile app switching
+let isMobileDevice = false;
+let mobileSuspendedConnections = new Map(); // Track connections that are in app-switching state
+let documentHiddenTimestamp = 0;            // When the document became hidden
+
+// At initialization, detect if we're on a mobile device
+const detectMobileDevice = () => {
+    const userAgent = navigator.userAgent || navigator.vendor || window.opera;
+    return /android|iphone|ipad|ipod|mobile|tablet/i.test(userAgent);
+};
 
 // Initialize the Peer.js instance with callbacks
 export function initializePeer(callbacks) {
@@ -64,9 +87,18 @@ export function initializePeer(callbacks) {
         callbackConfig = { ...callbackConfig, ...callbacks };
     }
 
+    // Detect if we're on a mobile device
+    isMobileDevice = detectMobileDevice();
+    console.log(`Device detected as ${isMobileDevice ? 'mobile' : 'desktop'}`);
+
     // Create a new Peer instance (server-broker connection)
     peer = new Peer(null, {
         debug: 2, // 0 = no logs, 3 = all logs
+        config: {
+            'iceServers': [
+                { urls: 'stun:stun.l.google.com:19302' }
+            ]
+        }
     });
 
     // Set up event handlers for the Peer connection
@@ -176,15 +208,42 @@ function checkAllConnections() {
 
 // Validate a specific client connection
 function validateConnection(clientId) {
-    if (!connections[clientId]) return;
+    if (!connections[clientId]) return false;
     
     const conn = connections[clientId];
-    if (!conn.open || !conn.peerConnection || conn.peerConnection.iceConnectionState === 'disconnected' ||
-        conn.peerConnection.iceConnectionState === 'failed' || conn.peerConnection.iceConnectionState === 'closed') {
+    // Check if connection appears broken
+    const connectionIsBroken = !conn.open || 
+                              !conn.peerConnection || 
+                              (conn.peerConnection.iceConnectionState === 'disconnected' ||
+                              conn.peerConnection.iceConnectionState === 'failed' || 
+                              conn.peerConnection.iceConnectionState === 'closed');
+    
+    if (connectionIsBroken) {
         console.log(`Connection to ${clientId} appears to be broken (state: ${conn.peerConnection ? conn.peerConnection.iceConnectionState : 'unknown'})`);
+        
+        // Before doing anything, store player position
+        if (!lastPlayerPositions.has(clientId)) {
+            storePlayerPosition(clientId);
+        }
+        
+        // For mobile devices, and especially when document is hidden (app switching)
+        // we want to be extremely tolerant and not disconnect
+        if (isDocumentHidden || isMobileDevice) {
+            console.log(`Document hidden or mobile device - suspending connection to ${clientId} rather than disconnecting`);
+            
+            // Just suspend the connection rather than disconnecting
+            suspendConnection(clientId, conn);
+            
+            // Return false but don't disconnect yet
+            return false;
+        }
+        
+        // For non-mobile or when we're sure it's a genuine disconnect
+        // follow normal disconnection procedure
         handleDisconnection(clientId);
         return false;
     }
+    
     return true;
 }
 
@@ -192,14 +251,34 @@ function validateConnection(clientId) {
 function validateHostConnection() {
     if (!hostConnection) return false;
     
-    if (!hostConnection.open || !hostConnection.peerConnection || 
-        hostConnection.peerConnection.iceConnectionState === 'disconnected' || 
-        hostConnection.peerConnection.iceConnectionState === 'failed' || 
-        hostConnection.peerConnection.iceConnectionState === 'closed') {
+    // Check if connection appears broken
+    const connectionIsBroken = !hostConnection.open || 
+                              !hostConnection.peerConnection || 
+                              (hostConnection.peerConnection.iceConnectionState === 'disconnected' ||
+                              hostConnection.peerConnection.iceConnectionState === 'failed' || 
+                              hostConnection.peerConnection.iceConnectionState === 'closed');
+    
+    if (connectionIsBroken) {
         console.log(`Host connection appears to be broken (state: ${hostConnection.peerConnection ? hostConnection.peerConnection.iceConnectionState : 'unknown'})`);
+        
+        // For mobile devices, and especially when document is hidden (app switching)
+        // we want to be extremely tolerant and not disconnect
+        if (isDocumentHidden || isMobileDevice) {
+            console.log('Document hidden or mobile device - suspending host connection rather than disconnecting');
+            
+            // Just suspend the connection rather than disconnecting
+            suspendConnection('host', hostConnection);
+            
+            // Return false but don't disconnect yet
+            return false;
+        }
+        
+        // For non-mobile or when we're sure it's a genuine disconnect
+        // follow normal disconnection procedure
         handleHostDisconnection();
         return false;
     }
+    
     return true;
 }
 
@@ -207,13 +286,25 @@ function validateHostConnection() {
 function checkConnections() {
     const now = Date.now();
     
+    // Determine appropriate timeout based on visibility state
+    // For mobile devices or hidden documents (app switching), use extremely long timeout
+    const currentTimeout = (isDocumentHidden || isMobileDevice) ? 
+                         CONNECTION_CONFIG.visibilityTimeout : 
+                         CONNECTION_TIMEOUT;
+    
     // Check client connections if we're the host
     if (isHostPeer) {
         Object.keys(connections).forEach(clientId => {
             const lastActivity = connectionLastActivity[clientId] || 0;
             const inactiveTime = now - lastActivity;
             
-            if (inactiveTime > CONNECTION_TIMEOUT) {
+            // During app switching on mobile, be very permissive with timeouts
+            if (isDocumentHidden && isMobileDevice) {
+                // Be extremely tolerant during app switching - essentially prevent disconnections
+                return;
+            }
+            
+            if (inactiveTime > currentTimeout) {
                 console.log(`Client ${clientId} appears to be inactive for ${inactiveTime}ms. Validating connection...`);
                 if (!validateConnection(clientId)) {
                     return; // Connection was invalid and has been handled
@@ -224,7 +315,12 @@ function checkConnections() {
                     sendPing(clientId);
                 } catch (err) {
                     console.error(`Error sending ping to ${clientId}:`, err);
-                    handleDisconnection(clientId);
+                    if (!isDocumentHidden && !isMobileDevice) {
+                        handleDisconnection(clientId);
+                    } else {
+                        // For mobile app switching, just suspend instead of disconnecting
+                        suspendConnection(clientId, connections[clientId]);
+                    }
                 }
             }
         });
@@ -234,7 +330,13 @@ function checkConnections() {
         const lastActivity = connectionLastActivity['host'] || 0;
         const inactiveTime = now - lastActivity;
         
-        if (inactiveTime > CONNECTION_TIMEOUT) {
+        // During app switching on mobile, be very permissive with timeouts
+        if (isDocumentHidden && isMobileDevice) {
+            // Be extremely tolerant during app switching - essentially prevent disconnections
+            return;
+        }
+        
+        if (inactiveTime > currentTimeout) {
             console.log(`Host appears to be inactive for ${inactiveTime}ms. Validating connection...`);
             if (!validateHostConnection()) {
                 return; // Connection was invalid and has been handled
@@ -245,7 +347,12 @@ function checkConnections() {
                 sendPingToHost();
             } catch (err) {
                 console.error('Error sending ping to host:', err);
-                handleHostDisconnection();
+                if (!isDocumentHidden && !isMobileDevice) {
+                    handleHostDisconnection();
+                } else {
+                    // For mobile app switching, just suspend instead of disconnecting
+                    suspendConnection('host', hostConnection);
+                }
             }
         }
     }
@@ -373,6 +480,71 @@ function handleIncomingConnection(conn) {
         return; // Skip normal connection handling for capacity checks
     }
     
+    // Check if this client is reconnecting after mobile app switch
+    if (isHostPeer && lastPlayerPositions.has(clientPeerId)) {
+        console.log(`Detected reconnection from mobile client: ${clientPeerId}`);
+        
+        // Get their stored position
+        const savedData = lastPlayerPositions.get(clientPeerId);
+        if (savedData && Date.now() - savedData.timestamp < CONNECTION_CONFIG.visibilityTimeout) {
+            console.log(`Player ${clientPeerId} is reconnecting with saved position: (${savedData.position.x}, ${savedData.position.y})`);
+            
+            // Restore their connection
+            conn.on('open', () => {
+                console.log(`Reconnected mobile client ${clientPeerId}`);
+                connections[clientPeerId] = conn;
+                updateActivityTimestamp(clientPeerId);
+                startHeartbeat(clientPeerId);
+                
+                // Critical: Restore their player data and color in the player maps
+                if (savedData.key) {
+                    // Restore player data
+                    playerData.set(savedData.key, {
+                        peerId: clientPeerId,
+                        isHost: false,
+                        color: savedData.color
+                    });
+                    
+                    // Restore color mapping
+                    playerColorMap.set(clientPeerId, savedData.color);
+                    
+                    console.log(`Restored player data for ${clientPeerId} with key ${savedData.key} and color ${savedData.color}`);
+                    
+                    // Send the client their restored key and color
+                    conn.send({ 
+                        type: 'assignKey', 
+                        key: savedData.key,
+                        color: savedData.color,
+                        isReconnect: true
+                    });
+                }
+                
+                // Trigger the position restoration callback
+                if (callbackConfig.onReconnectWithPosition) {
+                    console.log(`Calling position restoration for ${clientPeerId} at position:`, savedData.position);
+                    callbackConfig.onReconnectWithPosition(clientPeerId, savedData.position);
+                } else {
+                    console.warn(`No position restoration callback available for ${clientPeerId}`);
+                }
+                
+                // Remove from saved positions as it's been handled
+                lastPlayerPositions.delete(clientPeerId);
+                
+                // DO NOT call onClientConnected - we're already connected, just resuming
+                // Instead send a special message to tell app.js this is a reconnection
+                callbackConfig.onClientDisconnected(clientPeerId, {
+                    isReconnection: true,
+                    position: savedData.position,
+                    color: savedData.color
+                });
+            });
+            
+            // Set up normal event handlers for this connection
+            setupConnectionEventHandlers(conn, clientPeerId);
+            return;
+        }
+    }
+    
     // Check if the maximum player count has been reached
     if (isHostPeer && Object.keys(connections).length >= PLAYER_COLORS.length - 1) {
         console.warn(`Maximum players (${PLAYER_COLORS.length}) reached. Rejecting connection from ${clientPeerId}`);
@@ -431,6 +603,12 @@ function handleIncomingConnection(conn) {
         callbackConfig.onClientConnected(clientPeerId);
     });
 
+    // Set up event handlers for this new connection
+    setupConnectionEventHandlers(conn, clientPeerId);
+}
+
+// Extract connection event handler setup to avoid code duplication
+function setupConnectionEventHandlers(conn, clientPeerId) {
     conn.on('data', (data) => {
         // Update activity timestamp on data received
         updateActivityTimestamp(clientPeerId);
@@ -448,6 +626,11 @@ function handleIncomingConnection(conn) {
             // Reset missed ping counter when we receive a pong
             missedPingCounter[clientPeerId] = 0;
             console.log(`Received pong from client ${clientPeerId}, connection confirmed active`);
+            return;
+        } else if (data.type === 'mobileReconnect') {
+            // Client is telling us it's reconnecting after app switch
+            console.log(`Received mobile reconnect message from ${clientPeerId}`);
+            // The main reconnection logic is already handled in handleIncomingConnection
             return;
         }
         
@@ -643,10 +826,11 @@ function handleDisconnection(clientId) {
     delete connections[clientId];
     delete connectionLastActivity[clientId];
     
-    // If we're the host, clean up player data and free up their key and recycle their color
+    // If we're the host, preserve the player's data for potential mobile reconnection
     if (isHostPeer) {
         let playerKey = null;
         let playerColor = playerColorMap.get(clientId); // Get color directly from the map
+        let playerPosition = null;
         
         // Find the player entry by peerId
         for (const [key, data] of playerData.entries()) {
@@ -655,25 +839,56 @@ function handleDisconnection(clientId) {
                 break;
             }
         }
-            
+        
         if (playerKey) {
             console.log(`Player with key ${playerKey} and color ${playerColor} disconnected`);
-            usedKeys.delete(playerKey);
-            playerData.delete(playerKey);
             
-            // Remove from the color map and recycle the color
-            if (playerColor) {
-                playerColorMap.delete(clientId);
-                recyclePlayerColor(playerColor);
-                // Log color status after recycling
-                console.log(`After recycling, color queue: [${colorQueue}], Available colors: [${availableColors}]`);
+            // Get the player's last known position
+            if (callbackConfig.onGetPlayerPosition) {
+                playerPosition = callbackConfig.onGetPlayerPosition(clientId);
             }
             
-            // Broadcast updated game state to remaining players
-            broadcastGameState();
+            // Store all relevant player data for potential reconnection
+            if (playerPosition) {
+                lastPlayerPositions.set(clientId, {
+                    key: playerKey,
+                    position: playerPosition,
+                    color: playerColor,
+                    timestamp: Date.now()
+                });
+                
+                console.log(`Stored player data for potential reconnect: Position (${playerPosition.x}, ${playerPosition.y}), Color: ${playerColor}`);
+                
+                // For mobile users, we don't notify clients of disconnection immediately
+                // to prevent removing the player from the game state during app switching
+                if (isDocumentHidden || isMobileDevice) {
+                    console.log(`Mobile or hidden document detected - keeping player ${clientId} in game state for ${CONNECTION_CONFIG.visibilityTimeout/1000} seconds`);
+                    
+                    // Schedule cleanup after a reasonable timeout (60 seconds)
+                    setTimeout(() => {
+                        // If they haven't reconnected by now, clean up
+                        if (lastPlayerPositions.has(clientId)) {
+                            console.log(`No reconnection from ${clientId} after timeout. Cleaning up resources.`);
+                            // Instead of cleaning up directly, tell the game to remove the player
+                            callbackConfig.onClientFinalDisconnect(clientId);
+                            lastPlayerPositions.delete(clientId);
+                        }
+                    }, CONNECTION_CONFIG.visibilityTimeout); // Use the long timeout for mobile
+                    
+                    // DON'T trigger the client disconnected callback yet - wait for the timeout
+                    return;
+                } else {
+                    // For regular disconnection, clean up immediately
+                    cleanupDisconnectedPlayer(clientId, playerKey, playerColor);
+                }
+            } else {
+                // No position available, clean up immediately
+                cleanupDisconnectedPlayer(clientId, playerKey, playerColor);
+            }
         }
     }
     
+    // Trigger the callback for regular disconnections
     callbackConfig.onClientDisconnected(clientId);
 }
 
@@ -833,4 +1048,230 @@ function broadcastGameState() {
             conn.send(gameState);
         }
     });
+}
+
+// Add a function to set visibility state
+export function setVisibilityState(isHidden) {
+    const previousState = isDocumentHidden;
+    isDocumentHidden = isHidden;
+    console.log(`Visibility state changed: isHidden=${isHidden}`);
+    
+    // If the document just became hidden, record the timestamp
+    if (isHidden && !previousState) {
+        documentHiddenTimestamp = Date.now();
+        console.log('Document hidden timestamp set:', documentHiddenTimestamp);
+    }
+    
+    // Adjust connection management based on visibility state
+    if (isHidden) {
+        // When app is in background, prevent disconnection completely
+        console.log('Tab/app hidden: Preventing any disconnections due to app switching');
+        
+        // For mobile devices, set up special handling to keep connections alive
+        if (isMobileDevice) {
+            startMobileKeepAlive();
+        }
+    } else {
+        // App is visible again
+        console.log('Tab/app visible again after being hidden for:', (Date.now() - documentHiddenTimestamp) / 1000, 'seconds');
+        
+        // Reset missed ping counters when visibility returns
+        Object.keys(missedPingCounter).forEach(id => {
+            missedPingCounter[id] = 0;
+        });
+        
+        // Stop the mobile keep-alive system if it was started
+        stopMobileKeepAlive();
+        
+        // Resume any connections that were suspended during app switching
+        resumeSuspendedConnections();
+        
+        // Perform an immediate connection check to ensure everything is still connected
+        setTimeout(() => {
+            checkAllConnections();
+        }, 500);
+    }
+}
+
+// Mobile app switching special handling
+let mobileKeepAliveInterval = null;
+
+// Start sending keep-alive signals to maintain connection during app switching
+function startMobileKeepAlive() {
+    if (mobileKeepAliveInterval) {
+        clearInterval(mobileKeepAliveInterval);
+    }
+    
+    console.log('Starting mobile keep-alive system to preserve connections during app switching');
+    
+    mobileKeepAliveInterval = setInterval(() => {
+        // If we're a host, ping all clients
+        if (isHostPeer) {
+            Object.keys(connections).forEach(clientId => {
+                try {
+                    if (connections[clientId] && connections[clientId].open) {
+                        connections[clientId].send({
+                            type: 'keepAlive',
+                            source: 'mobileKeepAlive',
+                            timestamp: Date.now()
+                        });
+                        updateActivityTimestamp(clientId);
+                    }
+                } catch (err) {
+                    console.log(`Keep-alive ping failed for ${clientId}, but ignoring during app switching`);
+                    // Don't disconnect - the connection might resume when app is back
+                }
+            });
+        } 
+        // If we're a client, ping the host
+        else if (hostConnection) {
+            try {
+                if (hostConnection.open) {
+                    hostConnection.send({
+                        type: 'keepAlive',
+                        source: 'mobileKeepAlive',
+                        timestamp: Date.now()
+                    });
+                    updateActivityTimestamp('host');
+                }
+            } catch (err) {
+                console.log('Keep-alive ping to host failed, but ignoring during app switching');
+                // Don't disconnect - connection might resume when app is back
+            }
+        }
+    }, CONNECTION_CONFIG.mobileKeepAliveInterval);
+}
+
+// Stop mobile keep-alive interval
+function stopMobileKeepAlive() {
+    if (mobileKeepAliveInterval) {
+        clearInterval(mobileKeepAliveInterval);
+        mobileKeepAliveInterval = null;
+        console.log('Mobile keep-alive system stopped');
+    }
+}
+
+// Instead of disconnecting, suspend connection when tab is hidden
+function suspendConnection(peerId, conn) {
+    if (mobileSuspendedConnections.has(peerId)) return; // Already suspended
+    
+    console.log(`Suspending connection to ${peerId} during app switching rather than disconnecting`);
+    
+    // Store info about this connection for later revival
+    mobileSuspendedConnections.set(peerId, {
+        connection: conn,
+        timestamp: Date.now(),
+        lastActivity: connectionLastActivity[peerId] || Date.now()
+    });
+    
+    // Don't remove from connections object
+    // This allows the connection to potentially recover naturally
+}
+
+// Try to resume connections when app becomes visible again
+function resumeSuspendedConnections() {
+    if (mobileSuspendedConnections.size === 0) return;
+    
+    console.log(`Attempting to resume ${mobileSuspendedConnections.size} suspended connections`);
+    
+    // For each suspended connection, check if it's naturally recovered
+    // or if we need to attempt reconnection
+    mobileSuspendedConnections.forEach((data, peerId) => {
+        console.log(`Checking suspended connection to ${peerId}`);
+        
+        // If the connection exists and is open, it was never truly lost
+        const hasActiveConnection = (isHostPeer && connections[peerId] && connections[peerId].open) ||
+                                   (!isHostPeer && peerId === 'host' && hostConnection && hostConnection.open);
+        
+        if (hasActiveConnection) {
+            console.log(`Connection to ${peerId} is already active, no need to resume`);
+            mobileSuspendedConnections.delete(peerId);
+        } else {
+            console.log(`Connection to ${peerId} needs resuming`);
+            
+            // For client, try to reconnect to host
+            if (!isHostPeer && peerId === 'host') {
+                // Update UI to show reconnecting status
+                if (callbackConfig.onReconnecting) {
+                    callbackConfig.onReconnecting('host');
+                }
+                
+                // Attempt reconnection
+                connectToHost(data.connection.peer)
+                    .then(() => {
+                        console.log('Successfully reconnected to host after app switching');
+                        mobileSuspendedConnections.delete('host');
+                        
+                        // Request a fresh game state
+                        if (hostConnection) {
+                            hostConnection.send({ 
+                                type: 'requestInitialState',
+                                appSwitchResume: true
+                            });
+                        }
+                    })
+                    .catch(err => {
+                        console.error('Failed to reconnect to host after app switching:', err);
+                        // Try one more time after a short delay
+                        setTimeout(() => {
+                            connectToHost(data.connection.peer)
+                                .then(() => {
+                                    console.log('Successfully reconnected to host on second attempt');
+                                    mobileSuspendedConnections.delete('host');
+                                })
+                                .catch(err => {
+                                    console.error('Failed to reconnect to host on second attempt:', err);
+                                    // Finally give up
+                                    handleHostDisconnection();
+                                });
+                        }, 2000);
+                    });
+            }
+        }
+    });
+}
+
+// Helper function to store player position before disconnection
+function storePlayerPosition(clientId) {
+    // Check if we're the host
+    if (!isHostPeer) return;
+    
+    // Find the player data in the application state
+    // We need to get this from the playerData map
+    for (const [key, data] of playerData.entries()) {
+        if (data.peerId === clientId) {
+            // Get the player's position from the app state via the callback
+            if (callbackConfig.onGetPlayerPosition) {
+                const position = callbackConfig.onGetPlayerPosition(clientId);
+                if (position) {
+                    lastPlayerPositions.set(clientId, {
+                        key: key,
+                        position: position,
+                        color: data.color,
+                        timestamp: Date.now()
+                    });
+                    console.log(`Stored position for ${clientId}: (${position.x}, ${position.y})`);
+                }
+            }
+            break;
+        }
+    }
+}
+
+// Helper function to clean up player resources after disconnection
+function cleanupDisconnectedPlayer(clientId, playerKey, playerColor) {
+    if (playerKey) {
+        usedKeys.delete(playerKey);
+        playerData.delete(playerKey);
+    }
+    
+    if (playerColor) {
+        playerColorMap.delete(clientId);
+        recyclePlayerColor(playerColor);
+    }
+    
+    lastPlayerPositions.delete(clientId);
+    
+    // Broadcast updated game state to remaining players
+    broadcastGameState();
 }

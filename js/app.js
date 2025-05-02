@@ -27,39 +27,89 @@ document.addEventListener('DOMContentLoaded', () => {
 
 // Handle browser tab visibility changes (especially important for mobile)
 function handleVisibilityChange() {
-    if (document.hidden) {
-        console.log('Page is now hidden (browser tab inactive)');
-        // Page is hidden - might be mobile browser going to background
-        // We'll ping more aggressively to maintain connection
-        if (typeof window._visibilityPingInterval !== 'undefined') {
-            clearInterval(window._visibilityPingInterval);
-        }
+    const isHidden = document.hidden;
+    console.log(`Visibility change detected: ${isHidden ? 'hidden' : 'visible'}`);
+    
+    // Use the enhanced visibilityState system in p2p.js
+    import('./connection/p2p.js').then(p2pModule => {
+        p2pModule.setVisibilityState(isHidden);
         
-        // When page is hidden, start frequent pings to keep connection alive
-        if (!isHost && hostPeerId) {
-            console.log('Starting visibility change ping interval to host');
-            // Send a ping every second while hidden to prevent disconnection
-            window._visibilityPingInterval = setInterval(() => {
-                sendData(hostPeerId, { type: 'keepAlive', source: 'visibilityChange' });
-            }, 1000);
-        } else if (isHost) {
-            console.log('Host is hidden - continuing normal operations');
+        // When visibility returns, ensure we request latest game state
+        if (!isHidden && !isHost && hostPeerId) {
+            console.log('Requesting latest game state after visibility change');
+            sendData(hostPeerId, { 
+                type: 'requestInitialState',
+                appSwitchResume: true
+            });
         }
-    } else {
-        console.log('Page is now visible (browser tab active)');
-        // Page is visible again, stop aggressive pinging
-        if (typeof window._visibilityPingInterval !== 'undefined') {
-            clearInterval(window._visibilityPingInterval);
-            window._visibilityPingInterval = undefined;
-            console.log('Stopped visibility change ping interval');
-        }
-        
-        // If we're a client, check if we're still connected to the host
-        if (!isHost && hostPeerId) {
-            // Send a single ping to check connection is still alive
-            sendData(hostPeerId, { type: 'keepAlive', source: 'visibilityChangeEnd' });
-        }
+    });
+    
+    // Store visibility state for potential app reload detection
+    try {
+        localStorage.setItem('lastVisibilityState', isHidden ? 'hidden' : 'visible');
+        localStorage.setItem('lastVisibilityChangeTime', Date.now().toString());
+    } catch (e) {
+        console.error('Error accessing localStorage:', e);
     }
+}
+
+// Check if we need to reconnect after app switch and handle reconnection
+function checkMobileReconnectionNeeded() {
+    console.log('Checking if reconnection is needed after app switch');
+    
+    // Only clients need to reconnect to host
+    if (isHost || !hostPeerId) return;
+    
+    import('./connection/p2p.js').then(p2pModule => {
+        // Check if we're still connected to the host
+        if (p2pModule.isPeerConnected(hostPeerId)) {
+            console.log('Still connected to host after app switch, no reconnection needed');
+            
+            // Even if technically connected, send a keepalive to ensure host knows we're back
+            p2pModule.sendData(hostPeerId, { 
+                type: 'keepAlive', 
+                source: 'visibilityReturned',
+                mobileReturn: true 
+            });
+            
+            // Request latest game state to ensure we're in sync
+            p2pModule.sendData(hostPeerId, { type: 'requestInitialState' });
+            
+        } else {
+            console.log('Lost connection to host during app switch, attempting to reconnect');
+            
+            // Retrieve stored position
+            let lastX, lastY;
+            try {
+                lastX = parseInt(sessionStorage.getItem('lastPositionX') || '0');
+                lastY = parseInt(sessionStorage.getItem('lastPositionY') || '0');
+                console.log(`Retrieved stored position (${lastX}, ${lastY}) for reconnection`);
+            } catch (e) {
+                console.error('Error retrieving stored position:', e);
+            }
+            
+            // Attempt to reconnect
+            p2pModule.connectToHost(hostPeerId)
+                .then(() => {
+                    console.log('Successfully reconnected to host after app switch');
+                    
+                    // Notify host this is a reconnection, sending our last known position
+                    if (lastX !== undefined && lastY !== undefined) {
+                        p2pModule.sendData(hostPeerId, {
+                            type: 'mobileReconnect',
+                            lastPosition: { x: lastX, y: lastY }
+                        });
+                    }
+                    
+                    // Request current state from the host
+                    p2pModule.sendData(hostPeerId, { type: 'requestInitialState' });
+                })
+                .catch(err => {
+                    console.error('Failed to reconnect to host after app switch:', err);
+                    alert('Connection lost. Please refresh the page to reconnect.');
+                });
+        }
+    });
 }
 
 // --- Host Logic (II.B.3, II.D.3, II.D.4) ---
@@ -70,7 +120,10 @@ function handleCreateWorld() {
         onPeerConnected: setupHost,
         onDataReceived: handleHostData,
         onClientConnected: handleClientConnect,
-        onClientDisconnected: handleClientDisconnect
+        onClientDisconnected: handleMobileTemporaryDisconnect, // Renamed for clarity
+        onClientFinalDisconnect: handleClientDisconnect, // New callback for final disconnection
+        onGetPlayerPosition: getPlayerPosition,  // Add callback for position tracking
+        onReconnectWithPosition: handlePlayerReconnect // Add callback for position restoration
     });
 }
 
@@ -121,6 +174,96 @@ function setupHost(peerId) {
 
     // Set up Chat box (for all players, but activated here for host)
     setupChatBox();
+}
+
+// New function to get a player's position for the p2p connection manager
+function getPlayerPosition(playerId) {
+    // Find the player in the game state
+    const player = gameState.players.find(p => p.id === playerId);
+    if (player) {
+        return { x: player.x, y: player.y };
+    }
+    return null;
+}
+
+// New function to handle player reconnection with preserved position
+function handlePlayerReconnect(playerId, position) {
+    // This will be called by the p2p module when a player who 
+    // temporarily disconnected due to app switching reconnects
+    console.log(`Player ${playerId} reconnected. Restoring position to (${position.x}, ${position.y})`);
+    
+    // Find the player
+    let player = gameState.players.find(p => p.id === playerId);
+    
+    if (player) {
+        // Player exists, just update position
+        console.log(`Player ${playerId} found in game state, updating position`);
+        player.x = position.x;
+        player.y = position.y;
+    } else {
+        // Player not in game state, need to add them back
+        console.log(`Player ${playerId} not found in game state, adding them back`);
+        
+        // Since this is a reconnecting player, we don't have their color info in app.js
+        // Let's wait briefly for p2p.js to restore player data before proceeding
+        setTimeout(() => {
+            // Try to find the player again after a short delay
+            player = gameState.players.find(p => p.id === playerId);
+            
+            if (player) {
+                // Player has been added by another process, just update position
+                console.log(`Player ${playerId} now found in game state, updating position`);
+                player.x = position.x;
+                player.y = position.y;
+            } else {
+                // If still not found, add the player back with default values
+                // Get the first available color
+                const usedColors = gameState.players.map(p => p.color);
+                const availableColor = PLAYER_COLORS.find(color => !usedColors.includes(color)) || 'blue';
+                
+                console.log(`Adding player ${playerId} back to game state with color ${availableColor}`);
+                gameState.players.push({
+                    id: playerId,
+                    x: position.x,
+                    y: position.y,
+                    color: availableColor
+                });
+            }
+            
+            // Broadcast the updated state
+            broadcastGameState();
+        }, 500); // Small delay to allow other processes to update game state
+        return;
+    }
+    
+    // Broadcast the updated state to all players
+    broadcastGameState();
+    
+    // Show a game notification
+    showGameNotification(`Player reconnected at (${position.x}, ${position.y})`);
+}
+
+// New function to handle temporary mobile disconnections without removing the player
+function handleMobileTemporaryDisconnect(clientPeerId) {
+    console.log(`Mobile client temporarily disconnected: ${clientPeerId} - keeping player in game state`);
+    
+    // Don't remove the player from the game - they might be coming back
+    // Just mark them as disconnected in some way (e.g., visually)
+    const player = gameState.players.find(p => p.id === clientPeerId);
+    if (player) {
+        // Optionally fade out the player or mark them as inactive
+        // For now, we'll just log it and keep them in the game
+        console.log(`Player ${clientPeerId} marked as temporarily disconnected`);
+        
+        // Let other clients know this player is temporarily disconnected
+        const statusMessage = {
+            type: 'playerStatus',
+            playerId: clientPeerId,
+            status: 'temporarily_disconnected',
+            message: 'Player is temporarily disconnected'
+        };
+        broadcastData(statusMessage);
+    }
 }
 
 // Helper function to copy text to clipboard
@@ -178,7 +321,37 @@ function showCopyFeedback(feedbackElement) {
     }
 }
 
-function handleClientConnect(clientPeerId) {
+function handleClientConnect(clientPeerId, reconnectionData) {
+    // Check if this is a reconnection
+    if (reconnectionData && reconnectionData.isReconnection) {
+        console.log(`Mobile client ${clientPeerId} reconnecting with saved data:`, reconnectionData);
+        
+        // Find the player in the game state
+        let player = gameState.players.find(p => p.id === clientPeerId);
+        
+        if (player) {
+            // Player already exists, just update their position
+            console.log(`Reconnecting player ${clientPeerId} found in game state, updating position`);
+            player.x = reconnectionData.position.x;
+            player.y = reconnectionData.position.y;
+        } else {
+            // Player doesn't exist yet, add them back with their saved info
+            console.log(`Reconnecting player ${clientPeerId} not found in game state, adding with saved data`);
+            gameState.players.push({
+                id: clientPeerId,
+                x: reconnectionData.position.x,
+                y: reconnectionData.position.y,
+                color: reconnectionData.color || 'blue' // Use saved color or default to blue
+            });
+        }
+        
+        // Broadcast updated state to everyone
+        broadcastGameState();
+        showGameNotification(`Player reconnected at (${reconnectionData.position.x}, ${reconnectionData.position.y})`);
+        return;
+    }
+    
+    // Normal connection (not a reconnection)
     console.log(`Client connected: ${clientPeerId}`);
     if (gameState.players.length >= PLAYER_COLORS.length) {
         console.warn(`Max players reached. Connection from ${clientPeerId} ignored.`);
@@ -209,7 +382,85 @@ function handleHostData(data, senderPeerId) {
     } else if (data.type === 'chat') {
         // Process incoming chat message
         processChatMessage(data, senderPeerId);
+    } else if (data.type === 'mobileReconnect') {
+        // Handle mobile reconnection - try to restore player's position
+        console.log(`Mobile client ${senderPeerId} is reconnecting with last position:`, data.lastPosition);
+        
+        // Find the player in the game state
+        const player = gameState.players.find(p => p.id === senderPeerId);
+        
+        if (player) {
+            // Player already exists in game state (normal case)
+            console.log(`Found player ${senderPeerId} in game state, restoring position`);
+            
+            // Check if the position is valid and unoccupied
+            const pos = data.lastPosition;
+            if (pos && isWalkable(dungeon, pos.x, pos.y)) {
+                // Check if this position is occupied by another player
+                const isPositionOccupied = gameState.players.some(p => 
+                    p.id !== senderPeerId && p.x === pos.x && p.y === pos.y
+                );
+                
+                if (!isPositionOccupied) {
+                    // Safe to restore position
+                    console.log(`Restoring player ${senderPeerId} to position (${pos.x}, ${pos.y})`);
+                    player.x = pos.x;
+                    player.y = pos.y;
+                    showGameNotification(`Player reconnected at their previous position`);
+                } else {
+                    console.log(`Position (${pos.x}, ${pos.y}) is occupied, finding new position`);
+                    // Find a nearby unoccupied position
+                    const newPos = findNearbyUnoccupiedLocation(pos.x, pos.y);
+                    player.x = newPos.x;
+                    player.y = newPos.y;
+                    showGameNotification(`Player reconnected at position (${newPos.x}, ${newPos.y})`);
+                }
+            } else {
+                console.log(`Invalid position or unwalkable: (${pos?.x}, ${pos?.y}), finding new position`);
+                // Find a completely new position
+                const newPos = findUnoccupiedLocation();
+                player.x = newPos.x;
+                player.y = newPos.y;
+                showGameNotification(`Player reconnected at position (${newPos.x}, ${newPos.y})`);
+            }
+            
+            // Broadcast the updated state to all clients
+            broadcastGameState();
+        } else {
+            console.log(`Player ${senderPeerId} not found in game state, treating as new connection`);
+            // Add as a new player (this should rarely happen)
+            handleClientConnect(senderPeerId);
+        }
+    } else if (data.type === 'keepAlive' && data.mobileReturn) {
+        console.log(`Received keepAlive with mobileReturn flag from ${senderPeerId}`);
+        // Send current game state to ensure client is in sync
+        sendCurrentStateToClient(senderPeerId);
     }
+}
+
+// Helper function to find an unoccupied location near a specific point
+function findNearbyUnoccupiedLocation(startX, startY, maxRadius = 5) {
+    // Try positions in expanding "rings" around the starting point
+    for (let radius = 1; radius <= maxRadius; radius++) {
+        // Check all tiles in a square around the starting point at the current radius
+        for (let offsetX = -radius; offsetX <= radius; offsetX++) {
+            for (let offsetY = -radius; offsetY <= radius; offsetY++) {
+                // Only consider tiles exactly at the current radius (forming a square perimeter)
+                if (Math.abs(offsetX) === radius || Math.abs(offsetY) === radius) {
+                    const x = startX + offsetX;
+                    const y = startY + offsetY;
+                    
+                    // Check if this tile is walkable and unoccupied
+                    if (isWalkable(dungeon, x, y) && !isOccupied(x, y)) {
+                        return { x, y };
+                    }
+                }
+            }
+        }
+    }
+    
+    // If no nearby position found, fall back to any unoccupied location
+    return findUnoccupiedLocation();
 }
 
 // --- Client Logic (II.B.4, II.D.5) ---
