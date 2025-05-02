@@ -15,489 +15,729 @@ const PEER_CONFIG = {
 
 // Connection persistence configuration
 const CONNECTION_CONFIG = {
-    heartbeatInterval: 10000, // Milliseconds between heartbeats
-    reconnectAttempts: 3,     // Number of reconnect attempts
-    reconnectDelay: 2000      // Milliseconds between reconnect attempts
+    heartbeatInterval: 2000,    // Reduced from 3000ms to 2000ms for quicker detection
+    missedHeartbeatsLimit: 2,   // Number of consecutive missed heartbeats before considering disconnection
+    reconnectAttempts: 3,       // Number of reconnect attempts
+    reconnectDelay: 2000        // Milliseconds between reconnect attempts
 };
 
+// Global variables
 let peer = null;
-let hostConnection = null; // For clients: connection to the host
-const clientConnections = new Map(); // For host: connections to clients (peerId -> DataConnection)
-let peerId = null;
-let isHost = false;
-let lastKnownHostId = null; // Store host ID for reconnection
-let heartbeatTimerId = null;
-let reconnectAttempts = 0;
-let isReconnecting = false;
-let wasConnected = false; // Track if we've ever been connected
+let connections = {};
+let hostConnection = null;
+let isHostPeer = false;
+let hostConnectionListener = null;
+let callbackConfig = {
+    onPeerConnected: () => {},
+    onHostConnected: () => {},
+    onHostDisconnected: () => {},
+    onClientConnected: () => {},
+    onClientDisconnected: () => {},
+    onDataReceived: () => {},
+    onColorRecycled: () => {},  // New callback for color recycling
+};
 
-// Track page visibility
-let isPageVisible = true;
-let offPageTime = 0; // Track how long the page has been invisible
+// Add these variables near the top with other globals
+let usedKeys = new Set();
+let playerData = new Map(); // Store player data including their key
 
-let onPeerConnectedCallback = null; // Called when this peer successfully registers with the signaling server
-let onHostConnectedCallback = null; // Client: Called when connection to host is established
-let onClientConnectedCallback = null; // Host: Called when a client connects
-let onClientDisconnectedCallback = null; // Host: Called when a client disconnects
-let onDataReceivedCallback = null; // Called when data is received from any connection
+// Player color management
+const PLAYER_COLORS = ['red', 'blue', 'green', 'yellow'];
+let availableColors = [...PLAYER_COLORS]; // Copy of colors to assign
+let colorQueue = []; // Queue of colors from disconnected players to reuse first
+// Track which player has which color for recycling
+let playerColorMap = new Map();
 
-/**
- * Initializes PeerJS and registers with the signaling server.
- * @param {function(string)} onPeerConnected - Callback when peer is open, receives peerId.
- * @param {function(object)} onDataReceived - Callback when data is received.
- * @param {function(string)} [onClientConnected] - Host only: Callback when a client connects, receives clientPeerId.
- * @param {function(string)} [onClientDisconnected] - Host only: Callback when a client disconnects, receives clientPeerId.
- * @param {function()} [onHostConnected] - Client only: Callback when connection to host is open.
- */
+// Connection monitoring variables
+let connectionMonitorInterval = null;
+const CONNECTION_HEALTH_CHECK_INTERVAL = 3000; // Reduced from 5000ms to 3000ms
+const CONNECTION_TIMEOUT = 6000; // Reduced from 10000ms to 6000ms
+const connectionLastActivity = {}; // Track last activity timestamp for each connection
+const heartbeatIntervals = {}; // Track heartbeat intervals for each connection
+
+// Initialize the Peer.js instance with callbacks
 export function initializePeer(callbacks) {
-    onPeerConnectedCallback = callbacks.onPeerConnected;
-    onDataReceivedCallback = callbacks.onDataReceived;
-    onClientConnectedCallback = callbacks.onClientConnected;
-    onClientDisconnectedCallback = callbacks.onClientDisconnected;
-    onHostConnectedCallback = callbacks.onHostConnected;
+    // Store the callbacks for later use
+    if (callbacks) {
+        callbackConfig = { ...callbackConfig, ...callbacks };
+    }
 
-    // Create a Peer instance. If no ID is given, the server will assign one.
-    peer = new Peer(undefined, PEER_CONFIG);
+    // Create a new Peer instance (server-broker connection)
+    peer = new Peer(null, {
+        debug: 2, // 0 = no logs, 3 = all logs
+    });
 
+    // Set up event handlers for the Peer connection
     peer.on('open', (id) => {
-        console.log('My peer ID is: ' + id);
-        peerId = id;
-        if (onPeerConnectedCallback) {
-            onPeerConnectedCallback(id);
-        }
-        
-        // Start monitoring page visibility
-        setupVisibilityHandling();
+        console.log('Connected to signaling server with ID:', id);
+        callbackConfig.onPeerConnected(id);
     });
 
     peer.on('connection', (conn) => {
-        console.log(`Incoming connection from ${conn.peer}`);
-        if (isHost) {
-            setupConnectionHandlers(conn);
-            clientConnections.set(conn.peer, conn);
-            if (onClientConnectedCallback) {
-                onClientConnectedCallback(conn.peer);
-            }
-        } else {
-            console.warn('Incoming connection ignored (not host)');
-            conn.close(); // Clients don't accept incoming connections directly in this model
+        console.log('Incoming connection from:', conn.peer);
+        handleIncomingConnection(conn);
+    });
+
+    peer.on('error', (err) => {
+        console.error('Peer error:', err);
+        // Specific error handling for disconnection
+        if (err.type === 'peer-unavailable') {
+            console.error('Peer unavailable. Connection attempt failed.');
+        } else if (err.type === 'network' || err.type === 'server-error') {
+            console.error('Network or server error. Connection might be unstable.');
+        } else if (err.type === 'disconnected') {
+            // Handle disconnection error by checking all connections
+            checkAllConnections();
         }
     });
 
     peer.on('disconnected', () => {
-        console.log('Peer disconnected from signaling server. Attempting to reconnect...');
-        // Try to reconnect to the signaling server
-        setTimeout(() => {
-            if (peer) {
-                peer.reconnect();
-            }
-        }, 1000);
-    });
-
-    peer.on('close', () => {
-        console.log('Peer connection closed.');
-        peer = null;
-        stopHeartbeat();
-    });
-
-    peer.on('error', (err) => {
-        console.error('PeerJS error:', err);
-        
-        // Handle specific errors
-        if (err.type === 'peer-unavailable' && !isHost && !isReconnecting) {
-            console.log('Host appears to be unavailable. Will try to reconnect when page becomes active again.');
-        } else if (err.type === 'network' || err.type === 'server-error') {
-            console.log('Network or server error. Will attempt recovery when conditions improve.');
-        } else {
-            // Only show alert for critical errors
-            if (err.type === 'browser-incompatible') {
-                alert(`PeerJS Error: ${err.message} (Type: ${err.type})`);
-            }
-        }
-    });
-}
-
-/**
- * Sets up page visibility handling to detect when app is in background
- */
-function setupVisibilityHandling() {
-    // Track visibility changes
-    document.addEventListener('visibilitychange', handleVisibilityChange);
-    
-    // Track when user leaves the page and when they return
-    window.addEventListener('blur', () => {
-        isPageVisible = false;
-        offPageTime = Date.now();
+        console.log('Disconnected from signaling server. Attempting to reconnect...');
+        // Attempt to reconnect to signaling server
+        peer.reconnect();
     });
     
-    window.addEventListener('focus', () => {
-        const timeAway = Date.now() - offPageTime;
-        isPageVisible = true;
-        
-        // If we were away for more than 5 seconds, check connections
-        if (timeAway > 5000) {
-            console.log(`User returned after ${timeAway}ms. Checking connections...`);
-            checkConnectionsAfterInactivity();
-        }
-    });
+    // Start connection monitoring
+    startConnectionMonitoring();
+    
+    return peer;
 }
 
-/**
- * Handle visibility change events
- */
-function handleVisibilityChange() {
-    if (document.visibilityState === 'hidden') {
-        isPageVisible = false;
-        offPageTime = Date.now();
-    } else {
-        const timeAway = Date.now() - offPageTime;
-        isPageVisible = true;
-        
-        // If we were away for more than 5 seconds, check connections
-        if (timeAway > 5000) {
-            console.log(`Page visible again after ${timeAway}ms. Checking connections...`);
-            checkConnectionsAfterInactivity();
-        }
+// Get the next available color for a player
+function getNextPlayerColor() {
+    console.log(`Color assignment - Queue: [${colorQueue}], Available: [${availableColors}]`);
+    
+    // First use colors from the queue (colors from disconnected players)
+    if (colorQueue.length > 0) {
+        const color = colorQueue.shift(); // Get the first color in the queue (FIFO)
+        console.log(`Assigned recycled color: ${color}`);
+        return color;
+    }
+    
+    // If queue is empty, use remaining available colors
+    if (availableColors.length > 0) {
+        const color = availableColors.shift();
+        console.log(`Assigned new color: ${color}`);
+        return color;
+    }
+    
+    // If all colors are used, return a default color
+    console.warn('All player colors are in use, using default color');
+    return 'gray';
+}
+
+// Return a color to the queue when a player disconnects
+function recyclePlayerColor(color) {
+    if (color && PLAYER_COLORS.includes(color)) {
+        console.log(`Recycling color: ${color}`);
+        // Remove any duplicates of this color in the queue first
+        colorQueue = colorQueue.filter(c => c !== color);
+        // Add to the front of the queue so it's used first
+        colorQueue.unshift(color); 
+        console.log(`Color queue after recycling: [${colorQueue}]`);
+        callbackConfig.onColorRecycled(color); // Trigger the callback for color recycling
     }
 }
 
-/**
- * Checks and potentially restores connections after page becomes active again
- */
-function checkConnectionsAfterInactivity() {
-    // For host - check all client connections
-    if (isHost) {
-        let hasClosedConnections = false;
-        
-        clientConnections.forEach((conn, clientId) => {
-            if (!conn.open) {
-                console.log(`Connection to client ${clientId} is closed after inactivity.`);
-                hasClosedConnections = true;
+// Reset color system (useful when host disconnects/game resets)
+function resetColorSystem() {
+    availableColors = [...PLAYER_COLORS];
+    colorQueue = [];
+}
+
+// Start the connection monitoring system
+function startConnectionMonitoring() {
+    // Clear any existing interval
+    if (connectionMonitorInterval) {
+        clearInterval(connectionMonitorInterval);
+    }
+    
+    // Set up the monitoring interval
+    connectionMonitorInterval = setInterval(() => {
+        checkConnections();
+    }, CONNECTION_HEALTH_CHECK_INTERVAL);
+    
+    console.log('Connection monitoring started');
+}
+
+// Check all connections immediately (used when error events occur)
+function checkAllConnections() {
+    console.log('Running immediate connection check for all peers');
+    if (isHostPeer) {
+        Object.keys(connections).forEach(clientId => {
+            validateConnection(clientId);
+        });
+    } else if (hostConnection) {
+        validateHostConnection();
+    }
+}
+
+// Validate a specific client connection
+function validateConnection(clientId) {
+    if (!connections[clientId]) return;
+    
+    const conn = connections[clientId];
+    if (!conn.open || !conn.peerConnection || conn.peerConnection.iceConnectionState === 'disconnected' ||
+        conn.peerConnection.iceConnectionState === 'failed' || conn.peerConnection.iceConnectionState === 'closed') {
+        console.log(`Connection to ${clientId} appears to be broken (state: ${conn.peerConnection ? conn.peerConnection.iceConnectionState : 'unknown'})`);
+        handleDisconnection(clientId);
+        return false;
+    }
+    return true;
+}
+
+// Validate host connection
+function validateHostConnection() {
+    if (!hostConnection) return false;
+    
+    if (!hostConnection.open || !hostConnection.peerConnection || 
+        hostConnection.peerConnection.iceConnectionState === 'disconnected' || 
+        hostConnection.peerConnection.iceConnectionState === 'failed' || 
+        hostConnection.peerConnection.iceConnectionState === 'closed') {
+        console.log(`Host connection appears to be broken (state: ${hostConnection.peerConnection ? hostConnection.peerConnection.iceConnectionState : 'unknown'})`);
+        handleHostDisconnection();
+        return false;
+    }
+    return true;
+}
+
+// Check all connections for activity/timeout
+function checkConnections() {
+    const now = Date.now();
+    
+    // Check client connections if we're the host
+    if (isHostPeer) {
+        Object.keys(connections).forEach(clientId => {
+            const lastActivity = connectionLastActivity[clientId] || 0;
+            const inactiveTime = now - lastActivity;
+            
+            if (inactiveTime > CONNECTION_TIMEOUT) {
+                console.log(`Client ${clientId} appears to be inactive for ${inactiveTime}ms. Validating connection...`);
+                if (!validateConnection(clientId)) {
+                    return; // Connection was invalid and has been handled
+                }
+                
+                // If connection is still valid, send a ping
+                try {
+                    sendPing(clientId);
+                } catch (err) {
+                    console.error(`Error sending ping to ${clientId}:`, err);
+                    handleDisconnection(clientId);
+                }
             }
         });
-        
-        if (hasClosedConnections) {
-            // Send ping to all connected clients
-            sendHeartbeat();
-        }
     } 
-    // For client - check host connection
-    else if (hostConnection && wasConnected) {
-        if (!hostConnection.open) {
-            console.log('Connection to host is closed after inactivity. Attempting to reconnect...');
-            attemptReconnectToHost();
-        } else {
-            // Connection still appears open, send a ping to verify
-            sendHeartbeat();
-        }
-    }
-}
-
-/**
- * Set up heartbeat to keep connections alive
- */
-function startHeartbeat() {
-    stopHeartbeat(); // Clear any existing timer
-    
-    heartbeatTimerId = setInterval(() => {
-        if (isPageVisible) {
-            sendHeartbeat();
-        }
-    }, CONNECTION_CONFIG.heartbeatInterval);
-}
-
-/**
- * Stop the heartbeat timer
- */
-function stopHeartbeat() {
-    if (heartbeatTimerId) {
-        clearInterval(heartbeatTimerId);
-        heartbeatTimerId = null;
-    }
-}
-
-/**
- * Send a heartbeat message to verify connection is still active
- */
-function sendHeartbeat() {
-    const heartbeatMessage = { type: 'heartbeat', timestamp: Date.now() };
-    
-    if (isHost) {
-        broadcastData(heartbeatMessage);
-    } else if (hostConnection && hostConnection.open) {
-        try {
-            hostConnection.send(heartbeatMessage);
-        } catch (e) {
-            console.warn('Error sending heartbeat to host:', e);
-            if (!isReconnecting) {
-                attemptReconnectToHost();
+    // Check host connection if we're a client
+    else if (hostConnection) {
+        const lastActivity = connectionLastActivity['host'] || 0;
+        const inactiveTime = now - lastActivity;
+        
+        if (inactiveTime > CONNECTION_TIMEOUT) {
+            console.log(`Host appears to be inactive for ${inactiveTime}ms. Validating connection...`);
+            if (!validateHostConnection()) {
+                return; // Connection was invalid and has been handled
+            }
+            
+            // If connection is still valid, send a ping
+            try {
+                sendPingToHost();
+            } catch (err) {
+                console.error('Error sending ping to host:', err);
+                handleHostDisconnection();
             }
         }
     }
 }
 
-/**
- * Attempts to reconnect to the host
- */
-function attemptReconnectToHost() {
-    if (isReconnecting || !lastKnownHostId) return;
-    
-    isReconnecting = true;
-    reconnectAttempts = 0;
-    
-    console.log(`Attempting to reconnect to host: ${lastKnownHostId}`);
-    tryReconnect();
-}
-
-/**
- * Recursive function to attempt reconnection multiple times
- */
-function tryReconnect() {
-    if (reconnectAttempts >= CONNECTION_CONFIG.reconnectAttempts) {
-        console.log('Maximum reconnection attempts reached.');
-        isReconnecting = false;
-        // Let the user know they need to reload
-        if (wasConnected) {
-            showReconnectionFailed();
-        }
+// Send a ping to a specific client
+function sendPing(peerId) {
+    if (!connections[peerId] || !connections[peerId].open) {
+        console.warn(`Cannot send ping: Connection to ${peerId} is not open`);
+        handleDisconnection(peerId);
         return;
     }
     
-    reconnectAttempts++;
-    console.log(`Reconnection attempt ${reconnectAttempts}/${CONNECTION_CONFIG.reconnectAttempts}...`);
-    
-    // Close existing connection if it exists
-    if (hostConnection) {
-        hostConnection.close();
-        hostConnection = null;
+    try {
+        connections[peerId].send({
+            type: 'ping',
+            timestamp: Date.now()
+        });
+    } catch (err) {
+        console.error(`Error sending ping to ${peerId}:`, err);
+        handleDisconnection(peerId);
+    }
+}
+
+// Send a ping to the host
+function sendPingToHost() {
+    if (!hostConnection || !hostConnection.open) {
+        console.warn('Cannot send ping: Host connection is not open');
+        handleHostDisconnection();
+        return;
     }
     
-    // Try to establish a new connection
-    connectToHost(lastKnownHostId)
-        .then(() => {
-            console.log('Reconnection initiated...');
-            // Wait for connection open event
-        })
-        .catch(err => {
-            console.error('Reconnection attempt failed:', err);
-            // Try again after delay
-            setTimeout(() => {
-                if (isReconnecting) {
-                    tryReconnect();
-                }
-            }, CONNECTION_CONFIG.reconnectDelay);
+    try {
+        hostConnection.send({
+            type: 'ping',
+            timestamp: Date.now()
         });
+    } catch (err) {
+        console.error('Error sending ping to host:', err);
+        handleHostDisconnection();
+    }
 }
 
-/**
- * Show a notification that reconnection failed
- */
-function showReconnectionFailed() {
-    console.log('Creating reconnection failed notification');
-    const notification = document.createElement('div');
-    notification.className = 'connection-notification';
-    notification.innerHTML = `
-        <p>Connection to game lost.</p>
-        <button id="reload-btn">Reload</button>
-    `;
-    document.body.appendChild(notification);
+// Update the activity timestamp for a connection
+function updateActivityTimestamp(peerId) {
+    connectionLastActivity[peerId] = Date.now();
+}
+
+// Start sending regular heartbeats to a connection
+function startHeartbeat(peerId) {
+    // Clear any existing heartbeat interval for this peer
+    if (heartbeatIntervals[peerId]) {
+        clearInterval(heartbeatIntervals[peerId]);
+    }
     
-    document.getElementById('reload-btn').addEventListener('click', () => {
-        window.location.reload();
-    });
+    // Set up a new heartbeat interval
+    heartbeatIntervals[peerId] = setInterval(() => {
+        if (isHostPeer && connections[peerId]) {
+            sendPing(peerId);
+        } else if (!isHostPeer && peerId === 'host' && hostConnection) {
+            sendPingToHost();
+        }
+    }, CONNECTION_CONFIG.heartbeatInterval);
+    
+    console.log(`Started heartbeat for ${peerId}`);
 }
 
-/**
- * Sets up common handlers for a DataConnection.
- * @param {DataConnection} conn
- */
-function setupConnectionHandlers(conn) {
+// Handle an incoming connection from a client
+function handleIncomingConnection(conn) {
+    const clientPeerId = conn.peer;
+    
+    // Generate a new key for this client
+    const clientKey = generateUniqueKey();
+    
+    // Assign the next available color for this client
+    const playerColor = getNextPlayerColor();
+    
+    playerData.set(clientKey, { 
+        peerId: clientPeerId, 
+        isHost: false,
+        color: playerColor 
+    });
+    
+    // Track which player has which color
+    playerColorMap.set(clientPeerId, playerColor);
+    
+    conn.on('open', () => {
+        console.log(`Connection with client ${clientPeerId} is now open.`);
+        connections[clientPeerId] = conn;
+        updateActivityTimestamp(clientPeerId);
+        
+        // Start sending heartbeats to this client
+        startHeartbeat(clientPeerId);
+        
+        // Send the client their assigned key and color
+        conn.send({ 
+            type: 'assignKey', 
+            key: clientKey,
+            color: playerColor 
+        });
+        
+        callbackConfig.onClientConnected(clientPeerId);
+    });
+
     conn.on('data', (data) => {
-        // Handle special message types
-        if (data.type === 'heartbeat') {
-            // Respond to heartbeats with a pong
+        // Update activity timestamp on data received
+        updateActivityTimestamp(clientPeerId);
+        
+        // Handle ping messages specially
+        if (data.type === 'ping') {
+            // Respond to ping with a pong
             conn.send({ type: 'pong', timestamp: data.timestamp });
             return;
         } else if (data.type === 'pong') {
-            // Pong received, connection confirmed active
+            // Pong received, connection is active
+            console.log(`Received pong from client ${clientPeerId}`);
             return;
         }
         
-        // Regular data handling
-        if (onDataReceivedCallback) {
-            onDataReceivedCallback(data, conn.peer);
-        }
-    });
-
-    conn.on('open', () => {
-        console.log(`Data connection opened with ${conn.peer}`);
-        
-        // If this is the client connecting to the host
-        if (!isHost && conn.peer === hostConnection?.peer) {
-            wasConnected = true;
-            lastKnownHostId = conn.peer;
-            isReconnecting = false;
-            reconnectAttempts = 0;
-            
-            if (onHostConnectedCallback) {
-                onHostConnectedCallback();
-            }
-            
-            // Start the heartbeat after successful connection
-            startHeartbeat();
-        }
+        // Pass other data to the callback
+        console.log(`Data received from client ${clientPeerId}:`, data);
+        callbackConfig.onDataReceived(data, clientPeerId);
     });
 
     conn.on('close', () => {
-        console.log(`Data connection closed with ${conn.peer}`);
-        
-        // Only handle as a disconnection if page is visible
-        // Otherwise might be temporary due to page being in background
-        if (isPageVisible) {
-            handleDisconnection(conn.peer);
-        }
+        console.log(`Connection with client ${clientPeerId} closed.`);
+        handleDisconnection(clientPeerId);
     });
 
     conn.on('error', (err) => {
-        console.error(`Data connection error with ${conn.peer}:`, err);
-        
-        // Only handle as a disconnection if page is visible
-        if (isPageVisible) {
-            handleDisconnection(conn.peer);
-        }
+        console.error(`Error in connection with client ${clientPeerId}:`, err);
+        handleDisconnection(clientPeerId);
     });
 }
 
-function handleDisconnection(disconnectedPeerId) {
-    if (isHost) {
-        if (clientConnections.has(disconnectedPeerId)) {
-            clientConnections.delete(disconnectedPeerId);
-            console.log(`Client ${disconnectedPeerId} removed.`);
-            if (onClientDisconnectedCallback) {
-                onClientDisconnectedCallback(disconnectedPeerId);
-            }
-        }
-    } else {
-        // Client disconnected from host
-        if (hostConnection && hostConnection.peer === disconnectedPeerId) {
-            console.log('Disconnected from host.');
-            hostConnection = null;
-            
-            // Only try to reconnect if page is visible and we were connected before
-            if (isPageVisible && wasConnected) {
-                console.log('Attempting to reconnect to host...');
-                attemptReconnectToHost();
-            }
-        }
-    }
-}
-
-/**
- * Sets this peer instance to act as the host.
- */
+// Set up the peer as a host
 export function setAsHost() {
-    isHost = true;
-    console.log('This peer is now the host.');
-    // Start the heartbeat after becoming the host
-    startHeartbeat();
-}
-
-/**
- * Attempts to connect to a host peer.
- * @param {string} hostPeerId - The PeerJS ID of the host to connect to.
- * @returns {Promise<void>} Resolves when connection attempt is initiated, rejects on immediate error.
- */
-export function connectToHost(hostPeerId) {
-    if (!peer) {
-        console.error('PeerJS not initialized.');
-        return Promise.reject('PeerJS not initialized.');
-    }
-    if (isHost) {
-        console.error('Host cannot connect to another host.');
-        return Promise.reject('Host cannot connect to another host.');
-    }
-    if (hostConnection && hostConnection.open) {
-        console.warn('Already connected to a host.');
-        return Promise.resolve();
-    }
-
-    console.log(`Attempting to connect to host: ${hostPeerId}`);
-    lastKnownHostId = hostPeerId; // Store for potential reconnection
+    isHostPeer = true;
+    const hostKey = generateUniqueKey();
     
-    isHost = false;
-    hostConnection = peer.connect(hostPeerId, {
-        reliable: true // Use reliable data channel (SOW II.B.5)
+    // Reset the color system when setting up as host
+    resetColorSystem();
+    
+    // Host always gets the first color (typically red)
+    const hostColor = getNextPlayerColor();
+    
+    playerData.set(hostKey, { 
+        peerId: peer.id, 
+        isHost: true,
+        color: hostColor
     });
-
-    if (!hostConnection) {
-        console.error('Failed to initiate connection.');
-        return Promise.reject('Failed to initiate connection.');
-    }
-
-    setupConnectionHandlers(hostConnection);
-    return Promise.resolve();
+    
+    console.log('This peer is now set as the host. Key:', hostKey);
+    return hostKey;
 }
 
-/**
- * Sends data to a specific peer.
- * @param {string} targetPeerId - The ID of the peer to send data to.
- * @param {any} data - The data to send (must be serializable).
- */
-export function sendData(targetPeerId, data) {
-    let conn = null;
-    if (isHost) {
-        conn = clientConnections.get(targetPeerId);
-    } else if (hostConnection && hostConnection.peer === targetPeerId) {
-        conn = hostConnection;
-    }
+// Connect to a host peer
+export function connectToHost(hostPeerId) {
+    return new Promise((resolve, reject) => {
+        if (!peer) {
+            reject(new Error('Peer not initialized.'));
+            return;
+        }
 
-    if (conn && conn.open) {
-        conn.send(data);
-        // console.log(`Data sent to ${targetPeerId}:`, data); // Can be noisy
+        console.log(`Attempting to connect to host ${hostPeerId}...`);
+        const conn = peer.connect(hostPeerId);
+        
+        if (!conn) {
+            reject(new Error('Connection attempt failed.'));
+            return;
+        }
+
+        conn.on('open', () => {
+            console.log(`Connected to host ${hostPeerId}.`);
+            hostConnection = conn;
+            updateActivityTimestamp('host');
+            
+            // Start sending heartbeats to the host
+            startHeartbeat('host');
+            
+            callbackConfig.onHostConnected();
+            resolve();
+        });
+
+        conn.on('data', (data) => {
+            // Update activity timestamp on data received
+            updateActivityTimestamp('host');
+            
+            // Handle ping/pong messages
+            if (data.type === 'ping') {
+                // Respond to ping with a pong
+                conn.send({ type: 'pong', timestamp: data.timestamp });
+                return;
+            } else if (data.type === 'pong') {
+                // Pong received, connection is active
+                console.log('Received pong from host');
+                return;
+            }
+            
+            // Pass other data to the callback
+            console.log('Data received from host:', data);
+            callbackConfig.onDataReceived(data, hostPeerId);
+        });
+
+        conn.on('close', () => {
+            console.log('Connection to host closed.');
+            handleHostDisconnection();
+        });
+
+        conn.on('error', (err) => {
+            console.error('Error in connection to host:', err);
+            if (!hostConnection) {
+                // If we haven't established a connection yet, reject the promise
+                reject(err);
+            } else {
+                // Otherwise handle as a disconnection
+                handleHostDisconnection();
+            }
+        });
+
+        // Set a timeout for the connection attempt
+        setTimeout(() => {
+            if (!hostConnection) {
+                reject(new Error('Connection timeout. Host not responding.'));
+            }
+        }, 10000); // 10 seconds timeout
+    });
+}
+
+// Send data to a specific peer
+export function sendData(peerId, data) {
+    if (isHostPeer) {
+        // Host sending to a client
+        if (!connections[peerId]) {
+            console.warn(`Cannot send data: No connection to peer ${peerId}`);
+            return false;
+        }
+        
+        if (!connections[peerId].open) {
+            console.warn(`Cannot send data: Connection to peer ${peerId} is not open`);
+            handleDisconnection(peerId);
+            return false;
+        }
+        
+        try {
+            connections[peerId].send(data);
+            updateActivityTimestamp(peerId);
+            return true;
+        } catch (err) {
+            console.error(`Error sending data to ${peerId}:`, err);
+            handleDisconnection(peerId);
+            return false;
+        }
     } else {
-        console.warn(`Cannot send data: No open connection to ${targetPeerId}`);
+        // Client sending to the host
+        if (!hostConnection || !hostConnection.open) {
+            console.warn('Cannot send data: No open connection to host');
+            handleHostDisconnection();
+            return false;
+        }
+        
+        try {
+            hostConnection.send(data);
+            updateActivityTimestamp('host');
+            return true;
+        } catch (err) {
+            console.error('Error sending data to host:', err);
+            handleHostDisconnection();
+            return false;
+        }
     }
 }
 
-/**
- * Broadcasts data to all connected clients (Host only).
- * @param {any} data - The data to send.
- */
+// Broadcast data to all connected peers (host only)
 export function broadcastData(data) {
-    if (!isHost) {
-        console.warn('Only host can broadcast.');
-        return;
+    if (!isHostPeer) {
+        console.warn('Cannot broadcast: This peer is not a host.');
+        return false;
     }
-    // console.log('Broadcasting data to all clients:', data); // Can be noisy
-    clientConnections.forEach((conn) => {
-        if (conn.open) {
-            conn.send(data);
+
+    let success = true;
+    Object.keys(connections).forEach(clientId => {
+        if (!sendData(clientId, data)) {
+            success = false;
         }
     });
+    
+    return success;
 }
 
-/**
- * Gets the current PeerJS ID.
- * @returns {string | null}
- */
+// Handle disconnection of a client peer
+function handleDisconnection(clientId) {
+    if (!connections[clientId]) return;
+    
+    console.log(`Handling disconnection for client ${clientId}`);
+    
+    // Clear any heartbeat interval
+    if (heartbeatIntervals[clientId]) {
+        clearInterval(heartbeatIntervals[clientId]);
+        delete heartbeatIntervals[clientId];
+    }
+    
+    // Remove from active connections
+    delete connections[clientId];
+    delete connectionLastActivity[clientId];
+    
+    // If we're the host, clean up player data and free up their key and recycle their color
+    if (isHostPeer) {
+        let playerKey = null;
+        let playerColor = playerColorMap.get(clientId); // Get color directly from the map
+        
+        // Find the player entry by peerId
+        for (const [key, data] of playerData.entries()) {
+            if (data.peerId === clientId) {
+                playerKey = key;
+                break;
+            }
+        }
+            
+        if (playerKey) {
+            console.log(`Player with key ${playerKey} and color ${playerColor} disconnected`);
+            usedKeys.delete(playerKey);
+            playerData.delete(playerKey);
+            
+            // Remove from the color map and recycle the color
+            if (playerColor) {
+                playerColorMap.delete(clientId);
+                recyclePlayerColor(playerColor);
+                // Log color status after recycling
+                console.log(`After recycling, color queue: [${colorQueue}], Available colors: [${availableColors}]`);
+            }
+            
+            // Broadcast updated game state to remaining players
+            broadcastGameState();
+        }
+    }
+    
+    callbackConfig.onClientDisconnected(clientId);
+}
+
+// Handle disconnection from the host
+function handleHostDisconnection() {
+    if (!hostConnection) return;
+    
+    console.log('Handling host disconnection');
+    
+    // Clear host heartbeat interval
+    if (heartbeatIntervals['host']) {
+        clearInterval(heartbeatIntervals['host']);
+        delete heartbeatIntervals['host'];
+    }
+    
+    hostConnection = null;
+    delete connectionLastActivity['host'];
+    
+    // Clear all player data as the session is ending
+    playerData.clear();
+    usedKeys.clear();
+    
+    // Reset the color queue system
+    resetColorSystem();
+    
+    callbackConfig.onHostDisconnected();
+}
+
+// Get the local peer ID
 export function getPeerId() {
-    return peerId;
+    return peer ? peer.id : null;
 }
 
-/**
- * Gets the list of connected client PeerJS IDs (Host only).
- * @returns {string[]}
- */
+// Get the array of connected client peer IDs (host only)
 export function getClientPeerIds() {
-    if (!isHost) return [];
-    return Array.from(clientConnections.keys());
+    if (!isHostPeer) {
+        console.warn('Cannot get client IDs: This peer is not a host.');
+        return [];
+    }
+    
+    return Object.keys(connections);
 }
 
-/**
- * Gets the host PeerJS ID (Client only).
- * @returns {string | null}
- */
+// Get the host peer ID (client only)
 export function getHostPeerId() {
-    if (isHost || !hostConnection) return null;
-    return hostConnection.peer;
+    if (isHostPeer) {
+        console.warn('This peer is not connected to any host because it is a host.');
+        return null;
+    }
+    
+    return hostConnection ? hostConnection.peer : null;
+}
+
+// Check if a particular peer is still connected (for both host and clients)
+export function isPeerConnected(peerId) {
+    if (isHostPeer) {
+        return connections[peerId] && connections[peerId].open;
+    } else {
+        return hostConnection && hostConnection.open && hostConnection.peer === peerId;
+    }
+}
+
+// Get the number of connected clients (host only)
+export function getConnectedClientCount() {
+    if (!isHostPeer) {
+        return 0;
+    }
+    
+    return Object.keys(connections).length;
+}
+
+// Clean up resources when closing the application
+export function cleanupPeer() {
+    // Stop connection monitoring
+    if (connectionMonitorInterval) {
+        clearInterval(connectionMonitorInterval);
+        connectionMonitorInterval = null;
+    }
+    
+    // Clear all heartbeat intervals
+    Object.keys(heartbeatIntervals).forEach(peerId => {
+        clearInterval(heartbeatIntervals[peerId]);
+    });
+    heartbeatIntervals = {};
+    
+    // Close all client connections
+    Object.keys(connections).forEach(clientId => {
+        try {
+            connections[clientId].close();
+        } catch (err) {
+            console.error(`Error closing connection to ${clientId}:`, err);
+        }
+    });
+    
+    // Close host connection
+    if (hostConnection) {
+        try {
+            hostConnection.close();
+        } catch (err) {
+            console.error('Error closing host connection:', err);
+        }
+    }
+    
+    // Close the peer connection
+    if (peer) {
+        try {
+            peer.destroy();
+        } catch (err) {
+            console.error('Error destroying peer:', err);
+        }
+    }
+    
+    // Reset all variables
+    peer = null;
+    connections = {};
+    hostConnection = null;
+    isHostPeer = false;
+    connectionLastActivity = {};
+    
+    console.log('Peer resources cleaned up');
+}
+
+// Add key generation and management
+function generateUniqueKey() {
+    const keyLength = 6;
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+    let key;
+    
+    do {
+        key = '';
+        for (let i = 0; i < keyLength; i++) {
+            key += chars.charAt(Math.floor(Math.random() * chars.length));
+        }
+    } while (usedKeys.has(key));
+    
+    usedKeys.add(key);
+    return key;
+}
+
+// Add broadcastGameState function
+function broadcastGameState() {
+    if (!isHostPeer) return;
+    
+    const gameState = {
+        type: 'gameStateUpdate',
+        players: Array.from(playerData.entries()).map(([key, data]) => ({
+            id: data.peerId,
+            key: key,
+            color: data.color, // Include the player's color
+            // Include any other player state data here
+        }))
+    };
+    
+    // Broadcast to all connected clients
+    Object.values(connections).forEach(conn => {
+        if (conn.open) {
+            conn.send(gameState);
+        }
+    });
 }

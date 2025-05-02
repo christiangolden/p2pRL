@@ -232,17 +232,29 @@ function setupClient() {
 function handleClientData(data, senderPeerId) {
     // console.log(`Client received data from ${senderPeerId}:`, data);
     if (data.type === 'gameStateUpdate') {
-        // Update local state based on host broadcast (II.D.5)
-        gameState = data.state;
-        // Re-render the game view
-        if (dungeon) { // Ensure dungeon is generated before rendering
-             updateGameView(dungeon, gameState.players);
+        // Make sure data.state exists before using it
+        if (data.state) {
+            // Update local state based on host broadcast (II.D.5)
+            gameState = data.state;
+            // Re-render the game view
+            if (dungeon) { // Ensure dungeon is generated before rendering
+                 updateGameView(dungeon, gameState.players);
+            } else {
+                console.warn('Received game state update before dungeon was generated.');
+            }
         } else {
-            console.warn('Received game state update before dungeon was generated.');
+            console.error('Received gameStateUpdate without valid state data');
         }
     } else if (data.type === 'chat') {
         // Process incoming chat message
         processChatMessage(data, data.sender); // Use the sender ID from the message
+    } else if (data.type === 'assignKey') {
+        // Handle the assignKey message from host
+        console.log(`Received key assignment from host: ${data.key} with color ${data.color}`);
+        // Store the assigned key and color for future reference if needed
+        const assignedKey = data.key;
+        const assignedColor = data.color;
+        // You might want to display this information to the user or use it elsewhere
     } else {
         console.warn('Received unknown data type from host:', data);
     }
@@ -284,17 +296,75 @@ function addPlayer(peerId) {
         return;
     }
 
-    const color = PLAYER_COLORS[gameState.players.length];
-    // Simple initial position - near top-left, offset by player count
-    const initialPos = { x: 1 + gameState.players.length, y: 1 };
+    // Find the first available color from the PLAYER_COLORS array
+    // that's not currently being used by any player
+    let availableColor = null;
+    
+    // Check each color to see if it's available
+    for (const color of PLAYER_COLORS) {
+        // If no player is currently using this color, it's available
+        if (!gameState.players.some(p => p.color === color)) {
+            availableColor = color;
+            break; // Found an available color, stop searching
+        }
+    }
+    
+    // If no color is available (shouldn't happen with our player limit check), use the next one
+    if (!availableColor) {
+        availableColor = PLAYER_COLORS[gameState.players.length];
+    }
 
+    // Find a random unoccupied location within the dungeon
+    let initialPos = findUnoccupiedLocation();
+    
     gameState.players.push({
         id: peerId,
         x: initialPos.x,
         y: initialPos.y,
-        color: color
+        color: availableColor
     });
-    console.log(`Player ${peerId} added with color ${color} at (${initialPos.x}, ${initialPos.y})`);
+    
+    console.log(`Player ${peerId} added with color ${availableColor} at (${initialPos.x}, ${initialPos.y})`);
+    
+    // For host-to-client communication, send the client their assigned key and color
+    if (isHost && peerId !== localPeerId) {
+        console.log(`Host sending key assignment to client ${peerId} with color ${availableColor}`);
+        sendData(peerId, { 
+            type: 'assignKey', 
+            key: peerId,
+            color: availableColor 
+        });
+    }
+}
+
+// Find a random unoccupied location in the dungeon
+function findUnoccupiedLocation() {
+    // Create a list of all walkable and unoccupied positions
+    const validPositions = [];
+    
+    // Scan the entire dungeon and collect all valid positions
+    for (let y = 1; y < dungeon.length - 1; y++) {
+        for (let x = 1; x < dungeon[0].length - 1; x++) {
+            if (isWalkable(dungeon, x, y) && !isOccupied(x, y)) {
+                validPositions.push({ x, y });
+            }
+        }
+    }
+    
+    // If we found valid positions, pick one randomly
+    if (validPositions.length > 0) {
+        const randomIndex = Math.floor(Math.random() * validPositions.length);
+        return validPositions[randomIndex];
+    }
+    
+    // Fallback - this should never happen unless the dungeon is completely full
+    console.warn("Could not find any unoccupied location in the dungeon!");
+    return { x: 1, y: 1 };
+}
+
+// Check if a location is already occupied by another player
+function isOccupied(x, y) {
+    return gameState.players.some(player => player.x === x && player.y === y);
 }
 
 function removePlayer(peerId) {
@@ -366,11 +436,6 @@ function processMovement(playerId, direction) {
         // --- End Logging --- 
         // Invalid move, do nothing (SOW II.D.3)
     }
-}
-
-// Check if a cell is occupied by another player
-function isOccupied(x, y) {
-    return gameState.players.some(p => p.x === x && p.y === y);
 }
 
 // Host broadcasts the current game state to all clients (II.D.4)
