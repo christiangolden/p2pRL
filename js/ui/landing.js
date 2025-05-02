@@ -27,11 +27,17 @@ export function initLandingPage(createWorldCallback, joinWorldCallback) {
     let isKeyValid = false;
     let roomHasSpace = false;
     
-    // Initially disable the connect button until all validations pass
+    // Initially disable the connect button
     submitJoinButton.disabled = true;
+    submitJoinButton.classList.add('button-disabled');
+    submitJoinButton.classList.remove('button-ready');
     
     // Clear the session key input field on page load
     sessionKeyInput.value = '';
+
+    // Hide validation messages initially when input is empty
+    validationText.style.display = sessionKeyInput.value.trim() ? 'block' : 'none';
+    capacityText.style.display = sessionKeyInput.value.trim() ? 'block' : 'none';
 
     if (!createWorldButton || !joinWorldButton || !joinSection || !sessionKeyInput || !submitJoinButton || !landingPage) {
         console.error('Landing page elements not found!');
@@ -63,6 +69,11 @@ export function initLandingPage(createWorldCallback, joinWorldCallback) {
     // Add input event listener to validate key as user types
     sessionKeyInput.addEventListener('input', () => {
         const key = sessionKeyInput.value.trim();
+        
+        // Show validation messages only when there's input
+        validationText.style.display = key ? 'block' : 'none';
+        capacityText.style.display = key ? 'block' : 'none';
+        
         validateSessionKey(key);
         if (key.length >= 6) {
             // Only check capacity if key seems valid
@@ -88,10 +99,12 @@ export function initLandingPage(createWorldCallback, joinWorldCallback) {
 
     // Function to update the Connect button state based on validations
     function updateConnectButtonState() {
-        submitJoinButton.disabled = !(isKeyValid && roomHasSpace);
+        // Only enable button if there's input and it's valid and room has space
+        const hasInput = sessionKeyInput.value.trim().length > 0;
+        submitJoinButton.disabled = !(hasInput && isKeyValid && roomHasSpace);
         
         // Add a visual hint through button styling
-        if (isKeyValid && roomHasSpace) {
+        if (hasInput && isKeyValid && roomHasSpace) {
             submitJoinButton.classList.add('button-ready');
             submitJoinButton.classList.remove('button-disabled');
         } else {
