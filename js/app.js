@@ -245,6 +245,47 @@ function handleClientData(data, senderPeerId) {
         } else {
             console.error('Received gameStateUpdate without valid state data');
         }
+    } else if (data.type === 'gameFullError') {
+        // Handle the game full error by showing a message and redirecting back to landing
+        console.error('Game is full:', data.message);
+        
+        // Create and show a notification to the user
+        const notification = document.createElement('div');
+        notification.className = 'connection-notification';
+        
+        const message = document.createElement('p');
+        message.textContent = data.message + ' Would you like to create your own game instead?';
+        
+        const buttonContainer = document.createElement('div');
+        
+        const createButton = document.createElement('button');
+        createButton.textContent = 'Create a Game';
+        createButton.addEventListener('click', () => {
+            document.body.removeChild(notification);
+            // Reload the page and handle create world
+            window.location.reload();
+            // The user will need to click "Create World" again, but it's simpler than
+            // trying to switch modes on the fly
+        });
+        
+        const cancelButton = document.createElement('button');
+        cancelButton.textContent = 'Cancel';
+        cancelButton.addEventListener('click', () => {
+            document.body.removeChild(notification);
+            window.location.reload(); // Reload the page to reset the application state
+        });
+        
+        cancelButton.style.marginLeft = '10px';
+        cancelButton.style.backgroundColor = '#888';
+        
+        buttonContainer.appendChild(createButton);
+        buttonContainer.appendChild(cancelButton);
+        
+        notification.appendChild(message);
+        notification.appendChild(buttonContainer);
+        
+        document.body.appendChild(notification);
+        
     } else if (data.type === 'chat') {
         // Process incoming chat message
         processChatMessage(data, data.sender); // Use the sender ID from the message

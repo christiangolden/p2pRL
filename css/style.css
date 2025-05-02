@@ -408,3 +408,34 @@ input[type="text"] {
 .floor-char {
     color: #888; /* Floor characters slightly darker than walls */
 }
+
+.key-validation-text {
+    font-size: 14px;
+    margin-top: 5px;
+    text-align: center;
+    transition: color 0.3s ease;
+}
+
+.key-validation-invalid {
+    color: #ff5555; /* Red color for invalid status */
+}
+
+.key-validation-valid {
+    color: #55ff55; /* Green color for valid status */
+}
+
+/* Styles for disabled and ready connect button */
+.button-disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+.button-ready {
+    background-color: #4CAF50;
+    border-color: #45a049;
+    opacity: 1;
+}
+
+.button-ready:hover {
+    background-color: #45a049;
+}

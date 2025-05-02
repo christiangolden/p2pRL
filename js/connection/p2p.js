@@ -315,6 +315,55 @@ function startHeartbeat(peerId) {
 function handleIncomingConnection(conn) {
     const clientPeerId = conn.peer;
     
+    // Check if this is a capacity check connection (lightweight check)
+    if (conn.metadata && conn.metadata.capacityCheck) {
+        conn.on('open', () => {
+            console.log(`Received capacity check from ${clientPeerId}`);
+            
+            conn.on('data', (data) => {
+                if (data.type === 'checkCapacity') {
+                    // Check if we have space for more players
+                    const playerCount = Object.keys(connections).length + 1; // +1 for host
+                    const isFull = playerCount >= PLAYER_COLORS.length;
+                    
+                    // Send the response with current capacity info
+                    conn.send({
+                        type: 'capacityResponse',
+                        isFull: isFull,
+                        playerCount: playerCount
+                    });
+                }
+            });
+        });
+        
+        return; // Skip normal connection handling for capacity checks
+    }
+    
+    // Check if the maximum player count has been reached
+    if (isHostPeer && Object.keys(connections).length >= PLAYER_COLORS.length - 1) {
+        console.warn(`Maximum players (${PLAYER_COLORS.length}) reached. Rejecting connection from ${clientPeerId}`);
+        
+        // Accept the connection so we can send the rejection message
+        conn.on('open', () => {
+            // Send a rejection message to the client
+            conn.send({
+                type: 'gameFullError',
+                message: 'This game already has the maximum number of players.'
+            });
+            
+            // Close the connection after sending the message
+            setTimeout(() => {
+                try {
+                    conn.close();
+                } catch (err) {
+                    console.error(`Error closing connection to ${clientPeerId}:`, err);
+                }
+            }, 1000);
+        });
+        
+        return;
+    }
+    
     // Generate a new key for this client
     const clientKey = generateUniqueKey();
     
