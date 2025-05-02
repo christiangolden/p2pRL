@@ -9,8 +9,19 @@
 export function renderGame(gameViewElement, dungeon, players) {
     if (!gameViewElement || !dungeon) return;
 
-    // Create a copy of the dungeon to draw players onto
-    const displayGrid = dungeon.map(row => [...row]);
+    // Create a copy of the dungeon to draw players onto with styled elements
+    const displayGrid = dungeon.map(row => 
+        row.map(cell => {
+            // Apply styling to wall and floor characters
+            if (cell === '#') {
+                return `<span class="wall-char">${cell}</span>`;
+            } else if (cell === '.') {
+                return `<span class="floor-char">${cell}</span>`;
+            } else {
+                return cell;
+            }
+        })
+    );
 
     // Draw players onto the grid
     players.forEach(player => {

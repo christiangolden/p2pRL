@@ -484,28 +484,32 @@ function sendChatMessage() {
 }
 
 // Add a chat message to the UI - updated for traditional chat style (newest at bottom)
-function addChatMessage(sender, message, messageType = '') {
+function addChatMessage(sender, message, messageType = '', playerColor = null) {
     const chatMessages = document.getElementById('chat-messages');
     if (!chatMessages) return;
     
     const messageElement = document.createElement('div');
-    messageElement.className = `chat-message ${messageType}`;
+    
+    // Apply appropriate classes based on message type and player color
+    if (messageType === 'system') {
+        messageElement.className = 'chat-message system';
+    } else if (messageType === 'self') {
+        // For own messages, always use own player color
+        const currentPlayer = gameState.players.find(p => p.id === localPeerId);
+        const myColor = currentPlayer ? currentPlayer.color : null;
+        messageElement.className = `chat-message self player-${myColor}`;
+    } else {
+        // For messages from others, use their specific player color
+        messageElement.className = `chat-message player-${playerColor}`;
+    }
     
     // Format based on message type
     if (messageType === 'system') {
         // For system messages, simple text in the center
-        messageElement.textContent = `${message}`;
-    } else if (messageType === 'self') {
-        // For your own messages (right aligned)
         messageElement.textContent = message;
     } else {
-        // For messages from others (left aligned)
-        const usernameSpan = document.createElement('span');
-        usernameSpan.className = 'username';
-        usernameSpan.textContent = sender;
-        
-        messageElement.appendChild(usernameSpan);
-        messageElement.appendChild(document.createTextNode(message));
+        // For your own and other messages
+        messageElement.textContent = message;
     }
     
     // Add to bottom (append to container)
@@ -515,40 +519,42 @@ function addChatMessage(sender, message, messageType = '') {
     chatMessages.scrollTop = chatMessages.scrollHeight;
 }
 
-// Process incoming chat messages
+// Process a chat message received via the network
 function processChatMessage(data, senderPeerId) {
-    // Skip processing if this is our own message
-    if (senderPeerId === localPeerId) {
-        // Only rebroadcast to other clients if we're the host
-        if (isHost) {
-            gameState.players.forEach(player => {
-                if (player.id !== localPeerId) {
-                    // When host rebroadcasts, mark it as not the initial broadcast
-                    const rebroadcastData = {...data, isInitialBroadcast: false};
-                    sendData(player.id, rebroadcastData);
-                }
-            });
-        }
-        return; // Skip adding our own message again
+    console.log('Processing chat message:', data);
+    
+    // Find the sender player's information to get their color
+    const senderPlayer = gameState.players.find(p => p.id === senderPeerId);
+    const senderColor = senderPlayer ? senderPlayer.color : null;
+    
+    // If this is our own message coming back from the host, don't add it again
+    if (senderPeerId === localPeerId && !data.isFromHost) {
+        return;
     }
     
-    // REMOVED: The filter that prevented clients from seeing messages from other clients
-    // For clients: we now show all messages, not just from the host
+    // Add the message to the UI if it's not from ourselves
+    if (senderPeerId !== localPeerId || data.isFromHost) {
+        addChatMessage(senderPeerId, data.message, 'other', senderColor);
+    }
     
-    // Find the sender's display name based on color
-    const sender = gameState.players.find(p => p.id === data.sender);
-    const displayName = sender ? `Player (${sender.color})` : 'Unknown';
-    
-    // Add the message to chat
-    addChatMessage(displayName, data.message);
-    
-    // If host, rebroadcast to other clients (except the sender)
-    if (isHost && data.isInitialBroadcast) {
-        gameState.players.forEach(player => {
-            if (player.id !== localPeerId && player.id !== senderPeerId) {
-                // When host rebroadcasts, mark it as not the initial broadcast
-                const rebroadcastData = {...data, isInitialBroadcast: false};
-                sendData(player.id, rebroadcastData);
+    // Only the host should rebroadcast messages to everyone else
+    if (isHost) {
+        // Host received a message from a client, broadcast to all other clients
+        const messageToRelay = {
+            type: 'chat',
+            sender: senderPeerId,
+            message: data.message,
+            senderColor: senderColor,
+            isFromHost: true // Mark as coming from host to avoid duplicate display
+        };
+        
+        // Get all client peer IDs to broadcast to
+        const clientPeerIds = getClientPeerIds();
+        
+        // Broadcast to all clients except the sender
+        clientPeerIds.forEach(clientId => {
+            if (clientId !== senderPeerId) {
+                sendData(clientId, messageToRelay);
             }
         });
     }

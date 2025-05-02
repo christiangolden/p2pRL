@@ -19,9 +19,10 @@ body {
     font-family: monospace; /* Use monospace for ASCII grid */
     white-space: pre; /* Preserve whitespace for grid */
     line-height: 1; /* Ensure grid lines are tight */
-    border: 1px solid black;
+    border: 1px solid #444;
     padding: 10px;
-    background-color: #f0f0f0;
+    background-color: #222; /* Dark background for better contrast */
+    color: #aaa; /* Light grey for walls and floor characters */
 }
 
 #join-section {
@@ -46,11 +47,11 @@ input[type="text"] {
     margin-right: 5px;
 }
 
-/* Player colors - defined in SOW II.C.2 */
-.player-red { color: red; }
-.player-blue { color: blue; }
-.player-green { color: green; }
-.player-yellow { color: yellow; }
+/* Player colors - defined in SOW II.C.2 with enhanced brightness */
+.player-red { color: #ff5555; } /* Brighter red */
+.player-blue { color: #5599ff; } /* Brighter blue */
+.player-green { color: #55ff55; } /* Brighter green */
+.player-yellow { color: #ffff55; } /* Brighter yellow */
 
 /* Utility class */
 .hidden {
@@ -180,9 +181,9 @@ input[type="text"] {
     width: 100%;
     max-width: 500px;
     margin-top: 15px;
-    border: 1px solid #ccc;
+    border: 1px solid #444;
     border-radius: 5px;
-    background-color: white;
+    background-color: #000; /* Fully black background */
     display: flex;
     flex-direction: column;
     height: 200px; /* Fixed height for the entire container */
@@ -192,80 +193,161 @@ input[type="text"] {
 #chat-input-container {
     display: flex;
     padding: 8px;
-    border-bottom: 1px solid #eee;
-    background-color: #f5f5f5;
+    border-bottom: 1px solid #333;
+    background-color: #111; /* Darker input area */
 }
 
 #chat-input {
     flex-grow: 1;
     padding: 8px 12px;
-    border: 1px solid #ddd;
+    border: 1px solid #555;
     border-radius: 18px; /* Rounded corners like messaging apps */
     outline: none;
     font-size: 14px;
     height: 20px; /* Short height */
     min-height: 20px;
+    background-color: #222; /* Dark input */
+    color: #eee; /* Light text for contrast */
 }
 
 #chat-send-btn {
-    padding: 6px 12px;
-    margin-left: 8px;
-    background-color: #4285f4;
+    background-color: #2962FF; /* Bright blue */
     color: white;
     border: none;
-    border-radius: 4px;
+    border-radius: 5px;
+    padding: 5px 10px;
+    margin-left: 8px;
     cursor: pointer;
-    font-size: 14px;
+    font-weight: bold;
 }
 
-#chat-send-btn:hover {
-    background-color: #3367d6;
-}
-
-/* Messages below input, scrollable */
 #chat-messages {
     flex-grow: 1;
-    overflow-y: auto; /* Vertical scrolling */
+    overflow-y: auto;
     padding: 10px;
     display: flex;
-    flex-direction: column; /* Normal column direction - oldest at top, newest at bottom */
-    background-color: white;
+    flex-direction: column;
+    gap: 8px; /* Space between messages */
 }
 
+/* Message bubbles - Modern chat app styling */
 .chat-message {
+    padding: 8px 12px;
     margin: 4px 0;
-    padding: 6px 10px;
     border-radius: 12px;
     max-width: 80%;
     word-wrap: break-word;
     font-size: 14px;
-    line-height: 1.4;
 }
 
+/* System messages (centered) */
+.chat-message.system {
+    text-align: center;
+    background-color: #333;
+    color: #aaa;
+    font-style: italic;
+    margin: 4px auto;
+    width: fit-content;
+    max-width: 80%;
+}
+
+/* Self messages (right-aligned) */
 .chat-message.self {
-    align-self: flex-end;
-    background-color: #e3f2fd;
-    color: #000;
+    margin-left: auto;
+    margin-right: 5px;
+    color: #fff;
+    text-align: right;
 }
 
+/* Other player messages (left-aligned) */
 .chat-message:not(.self):not(.system) {
-    align-self: flex-start;
-    background-color: #f1f1f1;
+    margin-right: auto;
+    margin-left: 5px;
+    color: #fff;
+    text-align: left;
 }
 
+/* Player color bubbles */
+.chat-message.player-red {
+    background-color: #c53030;
+}
+
+.chat-message.player-blue {
+    background-color: #3182ce;
+}
+
+.chat-message.player-green {
+    background-color: #38a169;
+}
+
+.chat-message.player-yellow {
+    background-color: #d69e2e;
+}
+
+/* System messages */
 .chat-message.system {
     align-self: center;
-    color: #888;
-    font-style: italic;
-    background-color: transparent;
+    background-color: #333;
+    color: #aaa;
+    border-radius: 10px;
+    padding: 5px 10px;
     font-size: 12px;
-    padding: 4px 0;
+    font-style: italic;
+    max-width: 90%;
 }
 
-.chat-message .username {
-    font-weight: bold;
-    margin-right: 5px;
-    font-size: 12px;
+/* Messages from yourself */
+.chat-message.self {
+    align-self: flex-end;
+    background-color: #0B93F6; /* Default blue for own messages */
+    color: white;
+}
+
+/* Apply player colors to message bubbles */
+.chat-message.player-red {
+    background-color: #aa3333;
+    color: white;
+    align-self: flex-start;
+}
+
+.chat-message.player-blue {
+    background-color: #3355aa;
+    color: white;
+    align-self: flex-end;
+}
+
+.chat-message.player-green {
+    background-color: #33aa33;
+    color: white;
+    align-self: flex-start;
+}
+
+.chat-message.player-yellow {
+    background-color: #aaaa33;
+    color: black;
+    align-self: flex-start;
+}
+
+/* Self messages alignment and styling based on player color */
+.chat-message.self.player-red {
+    background-color: #aa3333;
+    align-self: flex-end;
+}
+
+.chat-message.self.player-blue {
+    background-color: #3355aa;
+    align-self: flex-end;
+}
+
+.chat-message.self.player-green {
+    background-color: #33aa33;
+    align-self: flex-end;
+}
+
+.chat-message.self.player-yellow {
+    background-color: #aaaa33;
+    align-self: flex-end;
+    color: black;
 }
 
 /* Connection notification styling */
@@ -320,4 +402,13 @@ input[type="text"] {
 
 .game-notification.show {
     opacity: 1;
+}
+
+/* Adding classes for dungeon elements with better contrast */
+.wall-char {
+    color: #bbb; /* Slightly brighter for walls */
+}
+
+.floor-char {
+    color: #888; /* Floor characters slightly darker than walls */
 }
