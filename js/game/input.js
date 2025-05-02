@@ -15,6 +15,11 @@ export function initInput(onMovementInput) {
 
 function handleKeyDown(event) {
     if (!_movementCallback) return;
+    
+    // Ignore repeated keydown events from key being held down
+    if (event.repeat) {
+        return;
+    }
 
     let direction = null;
     switch (event.key) {
